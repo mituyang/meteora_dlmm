@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@meteora-ag/dlmm": "^1.7.3",
+    "@solana/web3.js": "^1.98.4"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0"
+  }
+}
