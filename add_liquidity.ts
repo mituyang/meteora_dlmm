@@ -4,7 +4,6 @@ import {
   Keypair, 
   Transaction,
   VersionedTransaction,
-  sendAndConfirmTransaction,
   clusterApiUrl
 } from '@solana/web3.js';
 import DLMM, { StrategyType } from '@meteora-ag/dlmm';
@@ -24,6 +23,24 @@ const USER_WALLET_ADDRESS = new PublicKey(process.env.USER_WALLET_ADDRESS!);
 
 // 代币精度
 const TOKEN_Y_DECIMAL = 9;  //sol
+
+/**
+ * 计算动态左侧bins数量
+ * @param bin_step bin步长
+ * @returns 左侧bins数量
+ */
+function calculateDynamicLeftBins(bin_step: number): number {
+  // 目标值：0.4
+  const targetValue = 0.4;  //-60%
+  // 基础值：1 - bin_step/10000
+  const baseValue = 1 - bin_step / 10000;
+  
+  // 使用对数计算：leftBins = log(targetValue) / log(baseValue)
+  const leftBins = Math.log(targetValue) / Math.log(baseValue);
+  
+  // 返回向上取整的整数
+  return Math.ceil(leftBins);
+}
 
 // 移除JSON保存功能，只保留原始数据
 
@@ -193,15 +210,21 @@ async function completeBidAskStrategyFlow(
  */
 async function main() {
   try {
+    // 检查是否启用自动模式
+    const autoMode = process.env.AUTO_BIN_CALCULATION === 'true';
+    
     // 验证必需的环境变量
     const requiredEnvVars = [
       'PRIVATE_KEY',
       'POOL_ADDRESS', 
       'USER_WALLET_ADDRESS',
-      'SOL_AMOUNT',
-      'MIN_BIN_ID',
-      'MAX_BIN_ID'
+      'SOL_AMOUNT'
     ];
+    
+    // 根据模式添加不同的必需变量
+    if (!autoMode) {
+      requiredEnvVars.push('MIN_BIN_ID', 'MAX_BIN_ID');
+    }
     
     for (const envVar of requiredEnvVars) {
       if (!process.env[envVar]) {
@@ -210,6 +233,7 @@ async function main() {
     }
     
     console.log('✅ 所有环境变量配置完成');
+    console.log(`📊 模式: ${autoMode ? '自动计算Bin ID' : '手动设置Bin ID'}`);
     
     // 创建DLMM池实例
     const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
@@ -224,9 +248,36 @@ async function main() {
     const solAmount = parseFloat(process.env.SOL_AMOUNT!);
     const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
-    // 从环境变量读取Bin ID范围
-    const minBinId = parseInt(process.env.MIN_BIN_ID!);
-    const maxBinId = parseInt(process.env.MAX_BIN_ID!);
+    // 计算Bin ID范围
+    let minBinId: number;
+    let maxBinId: number;
+    
+    if (autoMode) {
+      // 自动模式：基于activeId和池的bin_step计算
+      const binStep = dlmmPool.lbPair.binStep;
+      const leftBins = calculateDynamicLeftBins(binStep);
+      
+      maxBinId = activeId - 1;  // activeId-1为maxBinId
+      minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
+      
+      console.log(`🔢 自动计算Bin ID范围:`);
+      console.log(`- Active ID: ${activeId}`);
+      console.log(`- Bin Step: ${binStep} (从池中获取)`);
+      console.log(`- 左侧Bins数量: ${leftBins}`);
+      console.log(`- Min Bin ID: ${minBinId}`);
+      console.log(`- Max Bin ID: ${maxBinId}`);
+      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+    } else {
+      // 手动模式：从环境变量读取
+      minBinId = parseInt(process.env.MIN_BIN_ID!);
+      maxBinId = parseInt(process.env.MAX_BIN_ID!);
+      
+      console.log(`🔢 手动设置Bin ID范围:`);
+      console.log(`- Active ID: ${activeId}`);
+      console.log(`- Min Bin ID: ${minBinId}`);
+      console.log(`- Max Bin ID: ${maxBinId}`);
+      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+    }
     
     // 验证activeId是否大于或等于maxBinId
     if (activeId < maxBinId) {
