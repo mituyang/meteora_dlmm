@@ -3,19 +3,24 @@ import {
   PublicKey, 
   Keypair, 
   Transaction,
+  VersionedTransaction,
+  sendAndConfirmTransaction,
   clusterApiUrl
 } from '@solana/web3.js';
 import DLMM, { StrategyType } from '@meteora-ag/dlmm';
 import BN from 'bn.js';
+import * as dotenv from 'dotenv';
+import bs58 from 'bs58';
+
+// 加载环境变量
+dotenv.config();
 
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
 
-// 用户指定的池地址
-const POOL_ADDRESS = new PublicKey('6XMrsTeFC8gYmVasKaBuVwU4fyAVPJLHd8jno82JBhS5');
-
-// 用户指定的钱包地址
-const USER_WALLET_ADDRESS = new PublicKey('F7vnfsoWYR3XQdPcDtRfLQv9KmQvsgXsV3xfRSHCRHT7');
+// 从环境变量读取配置
+const POOL_ADDRESS = new PublicKey(process.env.POOL_ADDRESS!);
+const USER_WALLET_ADDRESS = new PublicKey(process.env.USER_WALLET_ADDRESS!);
 
 // 代币精度
 const TOKEN_Y_DECIMAL = 9;  //sol
@@ -135,7 +140,10 @@ async function completeBidAskStrategyFlow(
   
   // 步骤2: 执行创建交易（让仓位被DLMM程序拥有）
   console.log('步骤2: 执行创建交易');
-  const createTxHash = await connection.sendTransaction(createTransaction, [positionKeypair]);
+  createTransaction.sign(positionKeypair as any);
+  const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
+  versionedCreateTransaction.sign([positionKeypair as any]);
+  const createTxHash = await connection.sendTransaction(versionedCreateTransaction);
   console.log('✅ 创建交易已发送:', createTxHash);
   
   // 等待交易确认
@@ -161,7 +169,10 @@ async function completeBidAskStrategyFlow(
   
   // 步骤4: 执行添加流动性交易
   console.log('步骤4: 执行添加流动性交易');
-  const addLiquidityTxHash = await connection.sendTransaction(addLiquidityTransaction, [userKeypair]);
+  addLiquidityTransaction.sign(userKeypair as any);
+  const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
+  versionedAddLiquidityTransaction.sign([userKeypair as any]);
+  const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
   console.log('✅ 添加流动性交易已发送:', addLiquidityTxHash);
   
   // 等待交易确认
@@ -182,6 +193,24 @@ async function completeBidAskStrategyFlow(
  */
 async function main() {
   try {
+    // 验证必需的环境变量
+    const requiredEnvVars = [
+      'PRIVATE_KEY',
+      'POOL_ADDRESS', 
+      'USER_WALLET_ADDRESS',
+      'SOL_AMOUNT',
+      'MIN_BIN_ID',
+      'MAX_BIN_ID'
+    ];
+    
+    for (const envVar of requiredEnvVars) {
+      if (!process.env[envVar]) {
+        throw new Error(`缺少必需的环境变量: ${envVar}`);
+      }
+    }
+    
+    console.log('✅ 所有环境变量配置完成');
+    
     // 创建DLMM池实例
     const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
     
@@ -190,19 +219,75 @@ async function main() {
     
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
-    const tokenYAmount = new BN(1).mul(new BN(10 ** TOKEN_Y_DECIMAL)); // 1 Token Y
     
-    // 用户指定的Bin ID范围
-    const minBinId = 1600;
-    const maxBinId = 1700;
+    // 从环境变量读取SOL数量
+    const solAmount = parseFloat(process.env.SOL_AMOUNT!);
+    const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
+    
+    // 从环境变量读取Bin ID范围
+    const minBinId = parseInt(process.env.MIN_BIN_ID!);
+    const maxBinId = parseInt(process.env.MAX_BIN_ID!);
     
     // 验证activeId是否大于或等于maxBinId
     if (activeId < maxBinId) {
         throw new Error(`activeId (${activeId}) 必须大于或等于 maxBinId (${maxBinId})`);
     } 
     
-    // 创建用户密钥对（实际使用时应该从钱包导入）
-    const userKeypair = new Keypair();
+    // 创建用户密钥对
+    let userKeypair: Keypair;
+    
+    // 从环境变量读取私钥
+    if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY !== 'your_private_key_here') {
+      try {
+        // 尝试Base58格式的私钥
+        userKeypair = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
+        console.log('✅ 从环境变量加载钱包 (Base58格式)');
+      } catch (base58Error) {
+        try {
+          // 尝试数组格式的私钥
+          userKeypair = Keypair.fromSecretKey(
+            new Uint8Array(JSON.parse(`[${process.env.PRIVATE_KEY}]`))
+          );
+          console.log('✅ 从环境变量加载钱包 (数组格式)');
+        } catch (arrayError) {
+          console.log('❌ 环境变量私钥格式错误');
+          console.log('支持的格式：Base58字符串 或 逗号分隔的数字数组');
+          throw new Error('私钥格式错误，请检查.env文件中的PRIVATE_KEY');
+        }
+      }
+    } else {
+      console.log('❌ 未找到私钥配置');
+      console.log('请在.env文件中设置PRIVATE_KEY');
+      throw new Error('未配置私钥，请在.env文件中设置PRIVATE_KEY');
+    }
+    
+    console.log('用户钱包地址:', userKeypair.publicKey.toString());
+    console.log('配置的钱包地址:', USER_WALLET_ADDRESS.toString());
+    console.log('SOL数量:', solAmount, 'SOL');
+    console.log('Token Y 数量:', tokenYAmount.toString(), 'lamports');
+    console.log('Bin ID范围:', `${minBinId} - ${maxBinId} (${maxBinId - minBinId + 1}个bins)`);
+    
+    // 验证钱包地址是否匹配
+    if (userKeypair.publicKey.toString() !== USER_WALLET_ADDRESS.toString()) {
+      console.log('⚠️  警告：生成的钱包地址与配置的地址不匹配');
+      console.log('建议：在.env文件中设置正确的PRIVATE_KEY');
+    }
+    
+    // 检查钱包余额
+    try {
+      const balance = await connection.getBalance(userKeypair.publicKey);
+      const balanceSOL = balance / 1e9;
+      console.log(`💰 钱包余额: ${balanceSOL.toFixed(6)} SOL (${balance} lamports)`);
+      
+      if (balance < 60000000) { // 0.06 SOL
+        console.log('⚠️  余额不足！建议充值至少 0.06 SOL');
+        console.log('需要支付：账户租金 + 交易费用');
+      } else {
+        console.log('✅ 余额充足，可以继续交易');
+      }
+    } catch (error) {
+      console.log('❌ 无法获取余额信息');
+    }
     
     // 使用createExtendedEmptyPosition创建大范围仓位
     const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
@@ -235,8 +320,41 @@ async function main() {
       }
     }, null, 2));
     
-    // 注意：这里不发送交易，只获取原始数据
-    // 实际使用时需要先发送并确认创建仓位交易，然后再调用addLiquidityByStrategy
+    // 发送并确认创建仓位交易
+    console.log('发送创建仓位交易...');
+    createTransaction.sign(userKeypair as any, positionKeypair as any);
+    const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
+    versionedCreateTransaction.sign([userKeypair as any, positionKeypair as any]);
+    const createTxHash = await connection.sendTransaction(versionedCreateTransaction);
+    console.log('创建交易哈希:', createTxHash);
+    
+    // 等待交易确认
+    console.log('等待交易确认...');
+    let confirmed = false;
+    let attempts = 0;
+    const maxAttempts = 30; // 最多等待30秒
+    
+    while (!confirmed && attempts < maxAttempts) {
+      try {
+        const status = await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
+        if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+          confirmed = true;
+          console.log('✅ 创建交易已确认');
+        } else {
+          console.log(`等待确认中... (${attempts + 1}/${maxAttempts})`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒
+          attempts++;
+        }
+      } catch (error) {
+        console.log(`确认检查失败: ${error}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        attempts++;
+      }
+    }
+    
+    if (!confirmed) {
+      throw new Error('创建交易确认超时');
+    }
     
     // 使用addLiquidityByStrategy添加流动性
     try {
@@ -273,6 +391,23 @@ async function main() {
           }
         }
       }, null, 2));
+      
+      // 发送并确认添加流动性交易
+      console.log('发送添加流动性交易...');
+      addLiquidityTransaction.sign(userKeypair as any);
+      const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
+      versionedAddLiquidityTransaction.sign([userKeypair as any]);
+      const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
+      console.log('添加流动性交易哈希:', addLiquidityTxHash);
+      
+      // 等待交易确认
+      await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+      console.log('添加流动性交易已确认');
+      
+      console.log('=== 交易完成 ===');
+      console.log('仓位地址:', positionKeypair.publicKey.toString());
+      console.log('创建交易:', createTxHash);
+      console.log('添加流动性交易:', addLiquidityTxHash);
       
     } catch (error) {
       console.log(JSON.stringify({
