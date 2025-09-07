@@ -10,6 +10,7 @@ import DLMM, { StrategyType } from '@meteora-ag/dlmm';
 import BN from 'bn.js';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
+import CryptoJS from 'crypto-js';
 
 // 加载环境变量
 dotenv.config();
@@ -40,6 +41,31 @@ function calculateDynamicLeftBins(bin_step: number): number {
   
   // 返回向上取整的整数
   return Math.ceil(leftBins);
+}
+
+/**
+ * 解密私钥
+ * @param encryptedPrivateKey 加密的私钥
+ * @param password 解密密码
+ * @returns 解密后的私钥字符串
+ */
+function decryptPrivateKey(encryptedPrivateKey: string, password: string): string {
+  try {
+    const decrypted = CryptoJS.AES.decrypt(encryptedPrivateKey, password);
+    return decrypted.toString(CryptoJS.enc.Utf8);
+  } catch (error) {
+    throw new Error('私钥解密失败，请检查密码是否正确');
+  }
+}
+
+/**
+ * 加密私钥（用于生成加密私钥的工具函数）
+ * @param privateKey 原始私钥
+ * @param password 加密密码
+ * @returns 加密后的私钥字符串
+ */
+function encryptPrivateKey(privateKey: string, password: string): string {
+  return CryptoJS.AES.encrypt(privateKey, password).toString();
 }
 
 // 移除JSON保存功能，只保留原始数据
@@ -289,17 +315,36 @@ async function main() {
     
     // 从环境变量读取私钥
     if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY !== 'your_private_key_here') {
+      let privateKeyString: string;
+      
+      // 检查是否使用加密私钥
+      if (process.env.PRIVATE_KEY_ENCRYPTED === 'true') {
+        if (!process.env.PRIVATE_KEY_PASSWORD) {
+          throw new Error('使用加密私钥时，必须设置PRIVATE_KEY_PASSWORD环境变量');
+        }
+        try {
+          privateKeyString = decryptPrivateKey(process.env.PRIVATE_KEY, process.env.PRIVATE_KEY_PASSWORD);
+          console.log('✅ 从环境变量加载钱包 (加密私钥)');
+        } catch (decryptError) {
+          console.log('❌ 私钥解密失败');
+          throw new Error('私钥解密失败，请检查PRIVATE_KEY_PASSWORD是否正确');
+        }
+      } else {
+        privateKeyString = process.env.PRIVATE_KEY;
+        console.log('✅ 从环境变量加载钱包 (明文私钥)');
+      }
+      
       try {
         // 尝试Base58格式的私钥
-        userKeypair = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
-        console.log('✅ 从环境变量加载钱包 (Base58格式)');
+        userKeypair = Keypair.fromSecretKey(bs58.decode(privateKeyString));
+        console.log('✅ 私钥格式：Base58');
       } catch (base58Error) {
         try {
           // 尝试数组格式的私钥
           userKeypair = Keypair.fromSecretKey(
-            new Uint8Array(JSON.parse(`[${process.env.PRIVATE_KEY}]`))
+            new Uint8Array(JSON.parse(`[${privateKeyString}]`))
           );
-          console.log('✅ 从环境变量加载钱包 (数组格式)');
+          console.log('✅ 私钥格式：数组');
         } catch (arrayError) {
           console.log('❌ 环境变量私钥格式错误');
           console.log('支持的格式：Base58字符串 或 逗号分隔的数字数组');

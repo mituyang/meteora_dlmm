@@ -2,7 +2,9 @@
   "dependencies": {
     "@meteora-ag/dlmm": "^1.7.3",
     "@solana/web3.js": "^1.98.4",
+    "@types/crypto-js": "^4.2.2",
     "bs58": "^6.0.0",
+    "crypto-js": "^4.2.0",
     "dotenv": "^17.2.2"
   },
   "devDependencies": {
