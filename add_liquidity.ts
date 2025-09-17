@@ -394,27 +394,27 @@ async function main() {
     );
     
     // 输出createExtendedEmptyPosition原始数据
-    console.log(JSON.stringify({
-      createExtendedEmptyPosition: {
-        transaction: {
-          instructions: createTransaction.instructions.map((ix: any) => ({
-            programId: ix.programId.toString(),
-            keys: ix.keys.map((key: any) => ({
-              pubkey: key.pubkey.toString(),
-              isSigner: key.isSigner,
-              isWritable: key.isWritable
-            })),
-            data: ix.data.toString('base64')
-          })),
-          feePayer: createTransaction.feePayer?.toString(),
-          recentBlockhash: createTransaction.recentBlockhash
-        },
-        positionKeypair: {
-          publicKey: positionKeypair.publicKey.toString(),
-          secretKey: Array.from(positionKeypair.secretKey)
-        }
-      }
-    }, null, 2));
+    // console.log(JSON.stringify({
+    //   createExtendedEmptyPosition: {
+    //     transaction: {
+    //       instructions: createTransaction.instructions.map((ix: any) => ({
+    //         programId: ix.programId.toString(),
+    //         keys: ix.keys.map((key: any) => ({
+    //           pubkey: key.pubkey.toString(),
+    //           isSigner: key.isSigner,
+    //           isWritable: key.isWritable
+    //         })),
+    //         data: ix.data.toString('base64')
+    //       })),
+    //       feePayer: createTransaction.feePayer?.toString(),
+    //       recentBlockhash: createTransaction.recentBlockhash
+    //     },
+    //     positionKeypair: {
+    //       publicKey: positionKeypair.publicKey.toString(),
+    //       secretKey: Array.from(positionKeypair.secretKey)
+    //     }
+    //   }
+    // }, null, 2));
     
     // 发送并确认创建仓位交易
     console.log('发送创建仓位交易...');
@@ -470,23 +470,23 @@ async function main() {
       });
       
       // 输出addLiquidityByStrategy原始数据
-      console.log(JSON.stringify({
-        addLiquidityByStrategy: {
-          transaction: {
-            instructions: addLiquidityTransaction.instructions.map((ix: any) => ({
-              programId: ix.programId.toString(),
-              keys: ix.keys.map((key: any) => ({
-                pubkey: key.pubkey.toString(),
-                isSigner: key.isSigner,
-                isWritable: key.isWritable
-              })),
-              data: ix.data.toString('base64')
-            })),
-            feePayer: addLiquidityTransaction.feePayer?.toString(),
-            recentBlockhash: addLiquidityTransaction.recentBlockhash
-          }
-        }
-      }, null, 2));
+      // console.log(JSON.stringify({
+      //   addLiquidityByStrategy: {
+      //     transaction: {
+      //       instructions: addLiquidityTransaction.instructions.map((ix: any) => ({
+      //         programId: ix.programId.toString(),
+      //         keys: ix.keys.map((key: any) => ({
+      //           pubkey: key.pubkey.toString(),
+      //           isSigner: key.isSigner,
+      //           isWritable: key.isWritable
+      //         })),
+      //         data: ix.data.toString('base64')
+      //       })),
+      //       feePayer: addLiquidityTransaction.feePayer?.toString(),
+      //       recentBlockhash: addLiquidityTransaction.recentBlockhash
+      //     }
+      //   }
+      // }, null, 2));
       
       // 发送并确认添加流动性交易
       console.log('发送添加流动性交易...');
