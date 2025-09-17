@@ -18,8 +18,15 @@ dotenv.config();
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
 
-// 从环境变量读取配置
-const POOL_ADDRESS = new PublicKey(process.env.POOL_ADDRESS!);
+// 从命令行与环境变量读取配置（命令行优先）
+const argv = process.argv.slice(2);
+function resolvePoolAddressFromArgs(): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith('--pool=')) return arg.split('=')[1];
+  }
+  return undefined;
+}
+
 const USER_WALLET_ADDRESS = new PublicKey(process.env.USER_WALLET_ADDRESS!);
 
 // 代币精度
@@ -57,18 +64,6 @@ function decryptPrivateKey(encryptedPrivateKey: string, password: string): strin
     throw new Error('私钥解密失败，请检查密码是否正确');
   }
 }
-
-/**
- * 加密私钥（用于生成加密私钥的工具函数）
- * @param privateKey 原始私钥
- * @param password 加密密码
- * @returns 加密后的私钥字符串
- */
-function encryptPrivateKey(privateKey: string, password: string): string {
-  return CryptoJS.AES.encrypt(privateKey, password).toString();
-}
-
-// 移除JSON保存功能，只保留原始数据
 
 /**
  * 使用createExtendedEmptyPosition创建大范围仓位（支持超过70个bins）
@@ -236,9 +231,6 @@ async function completeBidAskStrategyFlow(
  */
 async function main() {
   try {
-    // 检查是否启用自动模式
-    const autoMode = process.env.AUTO_BIN_CALCULATION === 'true';
-    
     // 验证必需的环境变量
     const requiredEnvVars = [
       'PRIVATE_KEY',
@@ -247,11 +239,6 @@ async function main() {
       'SOL_AMOUNT'
     ];
     
-    // 根据模式添加不同的必需变量
-    if (!autoMode) {
-      requiredEnvVars.push('MIN_BIN_ID', 'MAX_BIN_ID');
-    }
-    
     for (const envVar of requiredEnvVars) {
       if (!process.env[envVar]) {
         throw new Error(`缺少必需的环境变量: ${envVar}`);
@@ -259,7 +246,16 @@ async function main() {
     }
     
     console.log('✅ 所有环境变量配置完成');
-    console.log(`📊 模式: ${autoMode ? '自动计算Bin ID' : '手动设置Bin ID'}`);
+    console.log('📊 模式: 自动计算Bin ID');
+    
+    // 解析POOL_ADDRESS（命令行优先，其次.env）
+    const cliPoolAddress = resolvePoolAddressFromArgs();
+    const poolAddressStr = cliPoolAddress || process.env.POOL_ADDRESS;
+    if (!poolAddressStr) {
+      throw new Error('缺少必需的POOL_ADDRESS，请通过 --pool=  传入，或在.env中设置');
+    }
+    const POOL_ADDRESS = new PublicKey(poolAddressStr);
+    console.log(`使用的POOL_ADDRESS: ${POOL_ADDRESS.toString()}${cliPoolAddress ? ' (来自命令行)' : ' (来自.env)'}`);
     
     // 创建DLMM池实例
     const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
@@ -274,87 +270,51 @@ async function main() {
     const solAmount = parseFloat(process.env.SOL_AMOUNT!);
     const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
-    // 计算Bin ID范围
+    // 计算Bin ID范围（仅自动模式）
     let minBinId: number;
     let maxBinId: number;
-    
-    if (autoMode) {
-      // 自动模式：基于activeId和池的bin_step计算
-      const binStep = dlmmPool.lbPair.binStep;
-      const leftBins = calculateDynamicLeftBins(binStep);
-      
-      maxBinId = activeId - 1;  // activeId-1为maxBinId
-      minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
-      
-      console.log(`🔢 自动计算Bin ID范围:`);
-      console.log(`- Active ID: ${activeId}`);
-      console.log(`- Bin Step: ${binStep} (从池中获取)`);
-      console.log(`- 左侧Bins数量: ${leftBins}`);
-      console.log(`- Min Bin ID: ${minBinId}`);
-      console.log(`- Max Bin ID: ${maxBinId}`);
-      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
-    } else {
-      // 手动模式：从环境变量读取
-      minBinId = parseInt(process.env.MIN_BIN_ID!);
-      maxBinId = parseInt(process.env.MAX_BIN_ID!);
-      
-      console.log(`🔢 手动设置Bin ID范围:`);
-      console.log(`- Active ID: ${activeId}`);
-      console.log(`- Min Bin ID: ${minBinId}`);
-      console.log(`- Max Bin ID: ${maxBinId}`);
-      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
-    }
+    const binStep = dlmmPool.lbPair.binStep;
+    const leftBins = calculateDynamicLeftBins(binStep);
+    maxBinId = activeId - 1;  // activeId-1为maxBinId
+    minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
+    console.log(`🔢 自动计算Bin ID范围:`);
+    console.log(`- Active ID: ${activeId}`);
+    console.log(`- Bin Step: ${binStep} (从池中获取)`);
+    console.log(`- 左侧Bins数量: ${leftBins}`);
+    console.log(`- Min Bin ID: ${minBinId}`);
+    console.log(`- Max Bin ID: ${maxBinId}`);
+    console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
     
     // 验证activeId是否大于或等于maxBinId
     if (activeId < maxBinId) {
         throw new Error(`activeId (${activeId}) 必须大于或等于 maxBinId (${maxBinId})`);
     } 
     
-    // 创建用户密钥对
+    // 创建用户密钥对（仅支持加密私钥，解密后为Base58格式）
     let userKeypair: Keypair;
-    
-    // 从环境变量读取私钥
-    if (process.env.PRIVATE_KEY && process.env.PRIVATE_KEY !== 'your_private_key_here') {
-      let privateKeyString: string;
-      
-      // 检查是否使用加密私钥
-      if (process.env.PRIVATE_KEY_ENCRYPTED === 'true') {
-        if (!process.env.PRIVATE_KEY_PASSWORD) {
-          throw new Error('使用加密私钥时，必须设置PRIVATE_KEY_PASSWORD环境变量');
-        }
-        try {
-          privateKeyString = decryptPrivateKey(process.env.PRIVATE_KEY, process.env.PRIVATE_KEY_PASSWORD);
-          console.log('✅ 从环境变量加载钱包 (加密私钥)');
-        } catch (decryptError) {
-          console.log('❌ 私钥解密失败');
-          throw new Error('私钥解密失败，请检查PRIVATE_KEY_PASSWORD是否正确');
-        }
-      } else {
-        privateKeyString = process.env.PRIVATE_KEY;
-        console.log('✅ 从环境变量加载钱包 (明文私钥)');
-      }
-      
-      try {
-        // 尝试Base58格式的私钥
-        userKeypair = Keypair.fromSecretKey(bs58.decode(privateKeyString));
-        console.log('✅ 私钥格式：Base58');
-      } catch (base58Error) {
-        try {
-          // 尝试数组格式的私钥
-          userKeypair = Keypair.fromSecretKey(
-            new Uint8Array(JSON.parse(`[${privateKeyString}]`))
-          );
-          console.log('✅ 私钥格式：数组');
-        } catch (arrayError) {
-          console.log('❌ 环境变量私钥格式错误');
-          console.log('支持的格式：Base58字符串 或 逗号分隔的数字数组');
-          throw new Error('私钥格式错误，请检查.env文件中的PRIVATE_KEY');
-        }
-      }
-    } else {
+    if (!process.env.PRIVATE_KEY) {
       console.log('❌ 未找到私钥配置');
-      console.log('请在.env文件中设置PRIVATE_KEY');
       throw new Error('未配置私钥，请在.env文件中设置PRIVATE_KEY');
+    }
+    if (process.env.PRIVATE_KEY_ENCRYPTED !== 'true') {
+      throw new Error('仅支持加密私钥：请将 PRIVATE_KEY_ENCRYPTED 设置为 true');
+    }
+    if (!process.env.PRIVATE_KEY_PASSWORD) {
+      throw new Error('使用加密私钥时，必须设置 PRIVATE_KEY_PASSWORD');
+    }
+    let decryptedPrivateKeyBase58: string;
+    try {
+      decryptedPrivateKeyBase58 = decryptPrivateKey(process.env.PRIVATE_KEY, process.env.PRIVATE_KEY_PASSWORD);
+      console.log('✅ 已解密加密私钥');
+    } catch (e) {
+      console.log('❌ 私钥解密失败');
+      throw new Error('私钥解密失败，请检查 PRIVATE_KEY 与 PRIVATE_KEY_PASSWORD 是否匹配');
+    }
+    try {
+      userKeypair = Keypair.fromSecretKey(bs58.decode(decryptedPrivateKeyBase58));
+      console.log('✅ 私钥格式：Base58 (解密后)');
+    } catch (e) {
+      throw new Error('解密后的私钥必须是 Base58 的 secret key');
     }
     
     console.log('用户钱包地址:', userKeypair.publicKey.toString());
@@ -392,30 +352,7 @@ async function main() {
       minBinId,
       maxBinId
     );
-    
-    // 输出createExtendedEmptyPosition原始数据
-    // console.log(JSON.stringify({
-    //   createExtendedEmptyPosition: {
-    //     transaction: {
-    //       instructions: createTransaction.instructions.map((ix: any) => ({
-    //         programId: ix.programId.toString(),
-    //         keys: ix.keys.map((key: any) => ({
-    //           pubkey: key.pubkey.toString(),
-    //           isSigner: key.isSigner,
-    //           isWritable: key.isWritable
-    //         })),
-    //         data: ix.data.toString('base64')
-    //       })),
-    //       feePayer: createTransaction.feePayer?.toString(),
-    //       recentBlockhash: createTransaction.recentBlockhash
-    //     },
-    //     positionKeypair: {
-    //       publicKey: positionKeypair.publicKey.toString(),
-    //       secretKey: Array.from(positionKeypair.secretKey)
-    //     }
-    //   }
-    // }, null, 2));
-    
+
     // 发送并确认创建仓位交易
     console.log('发送创建仓位交易...');
     createTransaction.sign(userKeypair as any, positionKeypair as any);
@@ -468,25 +405,6 @@ async function main() {
         user: userKeypair.publicKey,
         slippage: 0.1
       });
-      
-      // 输出addLiquidityByStrategy原始数据
-      // console.log(JSON.stringify({
-      //   addLiquidityByStrategy: {
-      //     transaction: {
-      //       instructions: addLiquidityTransaction.instructions.map((ix: any) => ({
-      //         programId: ix.programId.toString(),
-      //         keys: ix.keys.map((key: any) => ({
-      //           pubkey: key.pubkey.toString(),
-      //           isSigner: key.isSigner,
-      //           isWritable: key.isWritable
-      //         })),
-      //         data: ix.data.toString('base64')
-      //       })),
-      //       feePayer: addLiquidityTransaction.feePayer?.toString(),
-      //       recentBlockhash: addLiquidityTransaction.recentBlockhash
-      //     }
-      //   }
-      // }, null, 2));
       
       // 发送并确认添加流动性交易
       console.log('发送添加流动性交易...');
