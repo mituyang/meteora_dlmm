@@ -11,6 +11,8 @@ import BN from 'bn.js';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
 import CryptoJS from 'crypto-js';
+import axios from 'axios';
+import https from 'https';
 
 // 加载环境变量
 dotenv.config();
@@ -23,6 +25,14 @@ const argv = process.argv.slice(2);
 function resolvePoolAddressFromArgs(): string | undefined {
   for (const arg of argv) {
     if (arg.startsWith('--pool=')) return arg.split('=')[1];
+  }
+  return undefined;
+}
+
+function resolveTokenAddressFromArgs(): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith('--token-address=')) return arg.split('=')[1];
+    if (arg.startsWith('--token=')) return arg.split('=')[1];
   }
   return undefined;
 }
@@ -91,6 +101,107 @@ async function createExtendedEmptyPosition(
   );
   
   return { transaction, positionKeypair };
+}
+
+/**
+ * 从 OKX DEX 获取指定 token 的 1m K线数据并输出
+ * 固定参数：chainIndex=501, bar=1m, limit=10
+ * 其余参数（after/before）保留为空
+ */
+async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<void> {
+  const baseUrl = 'https://web3.okx.com/api/v5/dex/market/candles';
+  const params = new URLSearchParams();
+  params.set('chainIndex', '501');
+  params.set('tokenContractAddress', tokenContractAddress);
+  params.set('bar', '1m');
+  params.set('limit', '10');
+  if (after) params.set('after', after);
+  if (before) params.set('before', before);
+  const url = `${baseUrl}?${params.toString()}`;
+
+  const data = await new Promise<any>((resolve, reject) => {
+    https.get(url, (res) => {
+      const statusCode = res.statusCode || 0;
+      if (statusCode < 200 || statusCode >= 300) {
+        reject(new Error(`HTTP 状态码 ${statusCode}`));
+        res.resume();
+        return;
+      }
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error('响应解析失败'));
+        }
+      });
+    }).on('error', (e) => reject(e));
+  });
+
+  console.log('OKX DEX 1m K线（limit=10）响应:');
+  console.log(JSON.stringify(data, null, 2));
+}
+
+
+/**
+ * 获取 OKX DEX 最新价格（需要鉴权）
+ * POST /api/v5/dex/market/price
+ * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
+ */
+async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
+  const apiKey = process.env.OKX_API_KEY;
+  const secretKey = process.env.OKX_SECRET_KEY;
+  const passphrase = process.env.OKX_PASSPHRASE;
+
+  if (!apiKey || !secretKey || !passphrase) {
+    throw new Error('缺少 OKX API 凭证：请在 .env 中设置 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE');
+  }
+
+  const timestamp = new Date().toISOString();
+  const method = 'POST';
+  const requestPath = '/api/v5/dex/market/price';
+  const bodyArray = [
+    {
+      chainIndex: '501',
+      tokenContractAddress
+    }
+  ];
+  const bodyString = JSON.stringify(bodyArray);
+
+  const prehash = `${timestamp}${method}${requestPath}${bodyString}`;
+  const signature = CryptoJS.enc.Base64.stringify(
+    CryptoJS.HmacSHA256(prehash, secretKey)
+  );
+
+  const url = `https://web3.okx.com${requestPath}`;
+  const headers = {
+    'Content-Type': 'application/json',
+    'OK-ACCESS-KEY': apiKey,
+    'OK-ACCESS-PASSPHRASE': passphrase,
+    'OK-ACCESS-TIMESTAMP': timestamp,
+    'OK-ACCESS-SIGN': signature
+  } as const;
+
+  const resp = await axios.post(url, bodyArray, { headers });
+  if (!resp?.data) {
+    console.log('OKX 价格响应为空');
+    return undefined;
+  }
+  if (resp.data.code !== '0') {
+    console.log(`OKX 返回错误: code=${resp.data.code}, msg=${resp.data.msg || ''}`);
+    return undefined;
+  }
+  const rows = Array.isArray(resp.data.data) ? resp.data.data : [];
+  const wantAddr = tokenContractAddress;
+  const entry = rows.find((r: any) => r?.chainIndex === '501' && String(r?.tokenContractAddress) === String(wantAddr)) || rows[0];
+  if (!entry?.price) {
+    console.log('OKX 响应中未找到价格字段，原始响应:', JSON.stringify(resp.data));
+    return undefined;
+  }
+  return String(entry.price);
 }
 
 
@@ -345,6 +456,35 @@ async function main() {
       console.log('❌ 无法获取余额信息');
     }
     
+    // 获取 OKX DEX K线
+    const tokenFromCli = resolveTokenAddressFromArgs();
+    if (tokenFromCli) {
+      // 先尝试获取最新价格（不阻塞 K 线）
+      try {
+        const latestPrice = await fetchOkxLatestPrice(tokenFromCli);
+        if (latestPrice !== undefined) {
+          console.log('OKX DEX 最新价格:', latestPrice);
+        } else {
+          console.log('未获取到 OKX 最新价格');
+        }
+      } catch (e) {
+        console.log('获取 OKX 最新价格失败:', e instanceof Error ? e.message : String(e));
+      }
+
+      // 再获取 K 线
+      try {
+        await fetchOkxCandles(tokenFromCli);
+      } catch (e) {
+        console.log('获取 OKX DEX K线失败:', e instanceof Error ? e.message : String(e));
+      }
+    } else {
+      console.log('未提供 tokenContractAddress（--token= 或 --token-address=），跳过 OKX DEX K线获取');
+    }
+
+    // 等待一段时间
+    console.log('等待 20 秒...');
+    await new Promise(resolve => setTimeout(resolve, 20000));
+
     // 使用createExtendedEmptyPosition创建大范围仓位
     const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
       dlmmPool,
