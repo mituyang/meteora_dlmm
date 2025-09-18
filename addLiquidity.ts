@@ -37,6 +37,19 @@ function resolveTokenAddressFromArgs(): string | undefined {
   return undefined;
 }
 
+// 控制是否启用 OKX 抓取（默认关闭，需要显式开启）
+function resolveEnableOkxFromArgs(): boolean | undefined {
+  for (const arg of argv) {
+    if (arg === '--enable-okx') return true;
+    if (arg.startsWith('--enable-okx=')) {
+      const v = arg.split('=')[1].toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
+      if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
+    }
+  }
+  return undefined;
+}
+
 // 从命令行读取 last_updated_first（仅命令行传入）
 function resolveLastUpdatedFirstFromArgs(): string | undefined {
   for (let i = 0; i < argv.length; i++) {
@@ -96,8 +109,8 @@ function calculateDynamicLeftBins(bin_step: number): number {
   // 使用对数计算：leftBins = log(targetValue) / log(baseValue)
   const leftBins = Math.log(targetValue) / Math.log(baseValue);
   
-  // 返回向上取整的整数
-  return Math.ceil(leftBins);
+  // 返回向上取整的整数，+5是为了抵御价格波动
+  return Math.ceil(leftBins) + 5;
 }
 
 /**
@@ -550,9 +563,12 @@ async function main() {
       console.log('❌ 无法获取余额信息');
     }
     
-    // 获取 OKX DEX K线和价格
+    // 获取 OKX DEX K线和价格（默认关闭，仅显式开启时执行）
     const tokenFromCli = resolveTokenAddressFromArgs();
-    if (tokenFromCli) {
+    const enableOkxFlag = resolveEnableOkxFromArgs();
+    const enableOkxEnv = (process.env.ENABLE_OKX || '').toLowerCase();
+    const enableOkx = enableOkxFlag ?? (enableOkxEnv === '1' || enableOkxEnv === 'true' || enableOkxEnv === 'yes' || enableOkxEnv === 'on');
+    if (enableOkx && tokenFromCli) {
       // 先尝试获取最新价格（不阻塞 K 线）
       try {
         const latestPrice = await fetchOkxLatestPrice(tokenFromCli);
@@ -589,12 +605,16 @@ async function main() {
         console.log('获取 OKX DEX K线失败:', e instanceof Error ? e.message : String(e));
       }
     } else {
-      console.log('未提供 tokenContractAddress（--token= 或 --token-address=），跳过 OKX DEX K线获取');
+      if (!enableOkx) {
+        console.log('OKX 抓取默认关闭；可用 --enable-okx 或 ENABLE_OKX=true 显式开启');
+      } else {
+        console.log('未提供 tokenContractAddress（--token= 或 --token-address=），跳过 OKX DEX 抓取');
+      }
     }
 
     // 等待一段时间
-    console.log('等待 20 秒...');
-    await new Promise(resolve => setTimeout(resolve, 20000));
+    // console.log('等待 20 秒...');
+    // await new Promise(resolve => setTimeout(resolve, 20000));
 
     // 使用createExtendedEmptyPosition创建大范围仓位
     const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
