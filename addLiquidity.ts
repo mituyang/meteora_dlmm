@@ -37,6 +37,46 @@ function resolveTokenAddressFromArgs(): string | undefined {
   return undefined;
 }
 
+// 从命令行读取 last_updated_first（仅命令行传入）
+function resolveLastUpdatedFirstFromArgs(): string | undefined {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith('--last_updated_first=')) {
+      const raw = arg.substring('--last_updated_first='.length);
+      return sanitizeLastUpdatedFirst(raw);
+    }
+    if (arg === '--last_updated_first') {
+      const part1 = argv[i + 1];
+      const part2 = argv[i + 2];
+      if (part1 && part2) {
+        return sanitizeLastUpdatedFirst(`${part1} ${part2}`);
+      }
+      if (part1) {
+        return sanitizeLastUpdatedFirst(part1);
+      }
+    }
+  }
+  return undefined;
+}
+
+// 规范化 last_updated_first 字符串：去掉包裹引号、处理%20/T分隔、去除转义符
+function sanitizeLastUpdatedFirst(input: string): string {
+  let s = input.trim();
+  // 去掉首尾引号或反引号
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith('\'') && s.endsWith('\'')) || (s.startsWith('`') && s.endsWith('`'))) {
+    s = s.slice(1, -1);
+  }
+  // 去掉尾部转义的引号
+  if (s.endsWith('\\"') || s.endsWith('\\\'')) {
+    s = s.slice(0, -2);
+  }
+  // 替换 URL 编码空格
+  s = s.replace(/%20/g, ' ');
+  // 替换 T 为空格
+  s = s.replace('T', ' ');
+  return s.trim();
+}
+
 const USER_WALLET_ADDRESS = new PublicKey(process.env.USER_WALLET_ADDRESS!);
 
 // 代币精度
@@ -58,6 +98,24 @@ function calculateDynamicLeftBins(bin_step: number): number {
   
   // 返回向上取整的整数
   return Math.ceil(leftBins);
+}
+
+/**
+ * 解析东八区时间串为毫秒时间戳，并将秒归零
+ * 格式示例：2025-09-11 05:02:26
+ */
+function parseLastUpdatedFirstToMillisEast8(input: string): number {
+  // 拆分日期与时间
+  const [datePart, timePart] = input.trim().split(' ');
+  if (!datePart || !timePart) throw new Error('last_updated_first 格式错误，应为 YYYY-MM-DD HH:mm:ss');
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hour, minute] = timePart.split(':').map(Number); // 秒将置零
+  if ([year, month, day, hour, minute].some((v) => Number.isNaN(v))) {
+    throw new Error('last_updated_first 解析失败：存在非法数字');
+  }
+  // 东八区：使用 Date.UTC 再减去8小时得到 UTC 时间戳
+  const utcMillis = Date.UTC(year, (month - 1), day, hour - 8, minute, 0, 0);
+  return utcMillis;
 }
 
 /**
@@ -108,8 +166,8 @@ async function createExtendedEmptyPosition(
  * 固定参数：chainIndex=501, bar=1m, limit=10
  * 其余参数（after/before）保留为空
  */
-async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<void> {
-  const baseUrl = 'https://web3.okx.com/api/v5/dex/market/candles';
+async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<any> {
+  const baseUrl = 'https://web3.okx.com/api/v5/dex/market/historical-candles';
   const params = new URLSearchParams();
   params.set('chainIndex', '501');
   params.set('tokenContractAddress', tokenContractAddress);
@@ -143,6 +201,7 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
 
   console.log('OKX DEX 1m K线（limit=10）响应:');
   console.log(JSON.stringify(data, null, 2));
+  return data;
 }
 
 
@@ -253,6 +312,22 @@ async function addLiquidityWithExtendedPosition(
 }
 
 /**
+ * 占位：根据 last_updated_first 计算 Bin 范围
+ * 后续将按你的详细规则实现
+ */
+function calculateBinsFromLastUpdatedFirst(
+  lastUpdatedFirst: string,
+  activeId: number,
+  binStep: number
+): { minBinId: number; maxBinId: number } {
+  // 占位策略：暂时复用旧逻辑，后续替换为真实算法
+  const leftBins = calculateDynamicLeftBins(binStep);
+  const minBinId = activeId - leftBins;
+  const maxBinId = activeId - 1;
+  return { minBinId, maxBinId };
+}
+
+/**
  * 完整的BidAsk策略流程（支持大于70个bins）
  * @param dlmmPool DLMM池实例
  * @param userKeypair 用户密钥对
@@ -357,7 +432,9 @@ async function main() {
     }
     
     console.log('✅ 所有环境变量配置完成');
-    console.log('📊 模式: 自动计算Bin ID');
+    // Bin 计算模式切换：默认 last_updated_first，可在 .env 配置 BIN_RANGE_MODE
+    const binRangeMode = (process.env.BIN_RANGE_MODE || 'last_updated_first').toLowerCase();
+    console.log(`📊 模式: ${binRangeMode === 'last_updated_first' ? 'last_updated_first' : '自动计算Bin ID'}`);
     
     // 解析POOL_ADDRESS（命令行优先，其次.env）
     const cliPoolAddress = resolvePoolAddressFromArgs();
@@ -381,20 +458,37 @@ async function main() {
     const solAmount = parseFloat(process.env.SOL_AMOUNT!);
     const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
-    // 计算Bin ID范围（仅自动模式）
+    // 计算Bin ID范围
     let minBinId: number;
     let maxBinId: number;
     const binStep = dlmmPool.lbPair.binStep;
-    const leftBins = calculateDynamicLeftBins(binStep);
-    maxBinId = activeId - 1;  // activeId-1为maxBinId
-    minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
-    console.log(`🔢 自动计算Bin ID范围:`);
-    console.log(`- Active ID: ${activeId}`);
-    console.log(`- Bin Step: ${binStep} (从池中获取)`);
-    console.log(`- 左侧Bins数量: ${leftBins}`);
-    console.log(`- Min Bin ID: ${minBinId}`);
-    console.log(`- Max Bin ID: ${maxBinId}`);
-    console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+
+    // 新模式：基于 last_updated_first（仅命令行输入），默认启用
+    const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
+    if (binRangeMode === 'last_updated_first' && lastUpdatedFirst) {
+      const result = calculateBinsFromLastUpdatedFirst(lastUpdatedFirst, activeId, binStep);
+      minBinId = result.minBinId;
+      maxBinId = result.maxBinId;
+      console.log(`🔢 last_updated_first 模式计算 Bin ID 范围:`);
+      console.log(`- Active ID: ${activeId}`);
+      console.log(`- Bin Step: ${binStep} (从池中获取)`);
+      console.log(`- last_updated_first: ${lastUpdatedFirst}`);
+      console.log(`- Min Bin ID: ${minBinId}`);
+      console.log(`- Max Bin ID: ${maxBinId}`);
+      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+    } else {
+      // 兼容旧逻辑：自动从 activeId 向左扩展
+      const leftBins = calculateDynamicLeftBins(binStep);
+      maxBinId = activeId - 1;  // activeId-1为maxBinId
+      minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
+      console.log(`🔢 自动计算Bin ID范围:`);
+      console.log(`- Active ID: ${activeId}`);
+      console.log(`- Bin Step: ${binStep} (从池中获取)`);
+      console.log(`- 左侧Bins数量: ${leftBins}`);
+      console.log(`- Min Bin ID: ${minBinId}`);
+      console.log(`- Max Bin ID: ${maxBinId}`);
+      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+    }
     
     // 验证activeId是否大于或等于maxBinId
     if (activeId < maxBinId) {
@@ -456,7 +550,7 @@ async function main() {
       console.log('❌ 无法获取余额信息');
     }
     
-    // 获取 OKX DEX K线
+    // 获取 OKX DEX K线和价格
     const tokenFromCli = resolveTokenAddressFromArgs();
     if (tokenFromCli) {
       // 先尝试获取最新价格（不阻塞 K 线）
@@ -473,7 +567,24 @@ async function main() {
 
       // 再获取 K 线
       try {
-        await fetchOkxCandles(tokenFromCli);
+        const kline = await fetchOkxCandles(tokenFromCli);
+        const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
+        if (lastUpdatedFirst) {
+          try {
+            const targetTs = parseLastUpdatedFirstToMillisEast8(lastUpdatedFirst);
+            const rows: any[] = Array.isArray(kline?.data) ? kline.data : [];
+            // OKX 返回 data 为二维数组: [ts, o, h, l, c, baseVol, quoteVol, ...]
+            const hit = rows.find((row: any[]) => String(row?.[0]) === String(targetTs));
+            if (hit) {
+              const c = hit[4];
+              console.log(`last_updated_first 命中收盘价(c): ${c}`);
+            } else {
+              console.log('未在 K 线中找到匹配时间戳');
+            }
+          } catch (e) {
+            console.log('解析 last_updated_first 失败:', e instanceof Error ? e.message : String(e));
+          }
+        }
       } catch (e) {
         console.log('获取 OKX DEX K线失败:', e instanceof Error ? e.message : String(e));
       }
