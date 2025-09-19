@@ -13,6 +13,8 @@ import bs58 from 'bs58';
 import CryptoJS from 'crypto-js';
 import axios from 'axios';
 import https from 'https';
+import fs from 'fs';
+import path from 'path';
 
 // 加载环境变量
 dotenv.config();
@@ -24,15 +26,15 @@ const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
 const argv = process.argv.slice(2);
 function resolvePoolAddressFromArgs(): string | undefined {
   for (const arg of argv) {
-    if (arg.startsWith('--pool=')) return arg.split('=')[1];
+    if (arg.startsWith('--pool=')) return sanitizeString(arg.split('=')[1]);
   }
   return undefined;
 }
 
 function resolveTokenAddressFromArgs(): string | undefined {
   for (const arg of argv) {
-    if (arg.startsWith('--token-address=')) return arg.split('=')[1];
-    if (arg.startsWith('--token=')) return arg.split('=')[1];
+    if (arg.startsWith('--token-address=')) return sanitizeString(arg.split('=')[1]);
+    if (arg.startsWith('--token=')) return sanitizeString(arg.split('=')[1]);
   }
   return undefined;
 }
@@ -42,7 +44,7 @@ function resolveEnableOkxFromArgs(): boolean | undefined {
   for (const arg of argv) {
     if (arg === '--enable-okx') return true;
     if (arg.startsWith('--enable-okx=')) {
-      const v = arg.split('=')[1].toLowerCase();
+      const v = sanitizeString(arg.split('=')[1]).toLowerCase();
       if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
       if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
     }
@@ -72,8 +74,8 @@ function resolveLastUpdatedFirstFromArgs(): string | undefined {
   return undefined;
 }
 
-// 规范化 last_updated_first 字符串：去掉包裹引号、处理%20/T分隔、去除转义符
-function sanitizeLastUpdatedFirst(input: string): string {
+// 通用的引号处理函数：去掉包裹引号、处理%20/T分隔、去除转义符
+function sanitizeString(input: string): string {
   let s = input.trim();
   // 去掉首尾引号或反引号
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith('\'') && s.endsWith('\'')) || (s.startsWith('`') && s.endsWith('`'))) {
@@ -85,12 +87,35 @@ function sanitizeLastUpdatedFirst(input: string): string {
   }
   // 替换 URL 编码空格
   s = s.replace(/%20/g, ' ');
-  // 替换 T 为空格
-  s = s.replace('T', ' ');
+  // 替换 T 为空格（仅在日期时间格式中）
+  // s = s.replace('T', ' '); // 注释掉这行，因为它会错误地替换地址中的T字符
   return s.trim();
 }
 
+// 规范化 last_updated_first 字符串：去掉包裹引号、处理%20/T分隔、去除转义符
+function sanitizeLastUpdatedFirst(input: string): string {
+  return sanitizeString(input);
+}
+
 const USER_WALLET_ADDRESS = new PublicKey(process.env.USER_WALLET_ADDRESS!);
+
+// 通用重试工具：失败等待1秒再试，共最多3次（首试+重试2次）
+async function withRetry<T>(fn: () => Promise<T>, desc: string): Promise<T> {
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        console.log(`获取失败，1秒后重试(${attempt}/${maxAttempts - 1}) -> ${desc}:`, err instanceof Error ? err.message : String(err));
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
 
 // 代币精度
 const TOKEN_Y_DECIMAL = 9;  //sol
@@ -190,27 +215,30 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
   if (before) params.set('before', before);
   const url = `${baseUrl}?${params.toString()}`;
 
-  const data = await new Promise<any>((resolve, reject) => {
-    https.get(url, (res) => {
-      const statusCode = res.statusCode || 0;
-      if (statusCode < 200 || statusCode >= 300) {
-        reject(new Error(`HTTP 状态码 ${statusCode}`));
-        res.resume();
-        return;
-      }
-      let raw = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { raw += chunk; });
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(raw);
-          resolve(parsed);
-        } catch (e) {
-          reject(new Error('响应解析失败'));
+  const data = await withRetry<any>(
+    () => new Promise<any>((resolve, reject) => {
+      https.get(url, (res) => {
+        const statusCode = res.statusCode || 0;
+        if (statusCode < 200 || statusCode >= 300) {
+          reject(new Error(`HTTP 状态码 ${statusCode}`));
+          res.resume();
+          return;
         }
-      });
-    }).on('error', (e) => reject(e));
-  });
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(raw);
+            resolve(parsed);
+          } catch (e) {
+            reject(new Error('响应解析失败'));
+          }
+        });
+      }).on('error', (e) => reject(e));
+    }),
+    'OKX DEX 1m K线'
+  );
 
   console.log('OKX DEX 1m K线（limit=10）响应:');
   console.log(JSON.stringify(data, null, 2));
@@ -257,7 +285,7 @@ async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string
     'OK-ACCESS-SIGN': signature
   } as const;
 
-  const resp = await axios.post(url, bodyArray, { headers });
+  const resp = await withRetry(() => axios.post(url, bodyArray, { headers }), 'OKX 最新价格');
   if (!resp?.data) {
     console.log('OKX 价格响应为空');
     return undefined;
@@ -507,8 +535,8 @@ async function main() {
     const POOL_ADDRESS = new PublicKey(poolAddressStr);
     console.log(`使用的POOL_ADDRESS: ${POOL_ADDRESS.toString()}${cliPoolAddress ? ' (来自命令行)' : ' (来自.env)'}`);
     
-    // 创建DLMM池实例
-    const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
+    // 创建DLMM池实例（带重试）
+    const dlmmPool = await withRetry(() => DLMM.create(connection, POOL_ADDRESS), 'DLMM.create');
     
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
@@ -680,7 +708,8 @@ async function main() {
                   console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
                 }
               } else {
-                console.log('未获取到最新价格，使用默认的last_updated_first模式');
+                console.log('未获取到最新价格，停止执行');
+                return; // 直接停止，不再继续默认 last_updated_first 模式
               }
             } else {
               console.log('未在 K 线中找到匹配时间戳');
@@ -724,15 +753,18 @@ async function main() {
     }
 
     // 等待一段时间
-    console.log('等待 20 秒...');
-    await new Promise(resolve => setTimeout(resolve, 20000));
+    // console.log('等待 20 秒...');
+    // await new Promise(resolve => setTimeout(resolve, 20000));
 
     // 使用createExtendedEmptyPosition创建大范围仓位
-    const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
-      dlmmPool,
-      userKeypair.publicKey,
-      minBinId,
-      maxBinId
+    const { transaction: createTransaction, positionKeypair } = await withRetry(
+      () => createExtendedEmptyPosition(
+        dlmmPool,
+        userKeypair.publicKey,
+        minBinId,
+        maxBinId
+      ),
+      'dlmmPool.createExtendedEmptyPosition'
     );
 
     // 发送并确认创建仓位交易
@@ -740,7 +772,7 @@ async function main() {
     createTransaction.sign(userKeypair as any, positionKeypair as any);
     const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
     versionedCreateTransaction.sign([userKeypair as any, positionKeypair as any]);
-    const createTxHash = await connection.sendTransaction(versionedCreateTransaction);
+    const createTxHash = await withRetry(() => connection.sendTransaction(versionedCreateTransaction), 'connection.sendTransaction(create)');
     console.log('创建交易哈希:', createTxHash);
     
     // 等待交易确认
@@ -751,7 +783,7 @@ async function main() {
     
     while (!confirmed && attempts < maxAttempts) {
       try {
-        const status = await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
+        const status = await withRetry(() => connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true }), 'connection.getSignatureStatus(create)');
         if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
           confirmed = true;
           console.log('✅ 创建交易已确认');
@@ -779,31 +811,57 @@ async function main() {
         maxBinId: maxBinId,
       };
       
-      const addLiquidityTransaction = await dlmmPool.addLiquidityByStrategy({
+      const addLiquidityTransaction = await withRetry(() => dlmmPool.addLiquidityByStrategy({
         positionPubKey: positionKeypair.publicKey,
         totalXAmount: tokenXAmount,
         totalYAmount: tokenYAmount,
         strategy: strategy,
         user: userKeypair.publicKey,
         slippage: 0.1
-      });
+      }), 'dlmmPool.addLiquidityByStrategy');
       
       // 发送并确认添加流动性交易
       console.log('发送添加流动性交易...');
       addLiquidityTransaction.sign(userKeypair as any);
       const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
       versionedAddLiquidityTransaction.sign([userKeypair as any]);
-      const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
+      const addLiquidityTxHash = await withRetry(() => connection.sendTransaction(versionedAddLiquidityTransaction), 'connection.sendTransaction(addLiquidity)');
       console.log('添加流动性交易哈希:', addLiquidityTxHash);
       
       // 等待交易确认
-      await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+      await withRetry(() => connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true }), 'connection.getSignatureStatus(addLiquidity)');
       console.log('添加流动性交易已确认');
       
       console.log('=== 交易完成 ===');
       console.log('仓位地址:', positionKeypair.publicKey.toString());
       console.log('创建交易:', createTxHash);
       console.log('添加流动性交易:', addLiquidityTxHash);
+      
+      // 将 positionAddress 持久化到对应池子的 JSON 文件中
+      try {
+        const poolFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.json`);
+        let json: any = {};
+        try {
+          const raw = fs.readFileSync(poolFile, 'utf8');
+          json = JSON.parse(raw);
+        } catch (e) {
+          // 若文件不存在或解析失败，则使用空对象，避免中断主流程
+          json = {};
+        }
+
+        const posAddr = positionKeypair.publicKey.toString();
+        // 记录到顶层便于其他脚本读取
+        json.positionAddress = posAddr;
+        // 同步到 data 区域（若存在）
+        if (json.data && typeof json.data === 'object') {
+          json.data.positionAddress = posAddr;
+        }
+
+        fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
+        console.log(`已写入 positionAddress 到 ${poolFile}`);
+      } catch (e: any) {
+        console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
+      }
       
     } catch (error) {
       console.log(JSON.stringify({

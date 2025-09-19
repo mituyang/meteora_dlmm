@@ -32,6 +32,24 @@ function decryptPrivateKey(encryptedPrivateKey: string, password: string): strin
   }
 }
 
+// 通用重试：失败等1秒再试，最多2次（总尝试3次）
+async function withRetry<T>(fn: () => Promise<T>, desc: string): Promise<T> {
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        console.log(`获取失败，1秒后重试(${attempt}/${maxAttempts - 1}) -> ${desc}:`, err instanceof Error ? err.message : String(err));
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 /**
  * 移除流动性的基本用法
  */
@@ -39,7 +57,7 @@ async function removeLiquidity() {
   try {
     // 1. 创建DLMM池实例
     const poolAddress = new PublicKey(process.env.POOL_ADDRESS!);
-    const dlmmPool = await DLMM.create(connection, poolAddress);
+    const dlmmPool = await withRetry(() => DLMM.create(connection, poolAddress), 'DLMM.create');
     
     // 2. 仓位信息
     const positionPubKey = new PublicKey(process.env.POSITION_ADDRESS!);
@@ -77,7 +95,7 @@ async function removeLiquidity() {
     console.log('Bin范围:', `${lowerBinId} - ${upperBinId}`);
     
     // 5. 调用removeLiquidity方法 - 默认移除所有流动性
-    const transactions = await dlmmPool.removeLiquidity({
+    const transactions = await withRetry(() => dlmmPool.removeLiquidity({
       user: new PublicKey(process.env.USER_WALLET_ADDRESS!),  // 用户公钥 (从.env读取)
       position: positionPubKey,              // 仓位公钥
       fromBinId: lowerBinId,                 // 下限bin ID
@@ -85,7 +103,7 @@ async function removeLiquidity() {
       bps: new BN(10000),                    // 移除100%流动性 (10000 BPS = 100%) - 默认移除所有流动性
       shouldClaimAndClose: true,             // 领取奖励并关闭仓位 - 默认true
       skipUnwrapSOL: false                   // 不解包SOL - 默认false
-    });
+    }), 'dlmmPool.removeLiquidity');
     
     console.log(`生成了 ${transactions.length} 个交易`);
     
@@ -99,11 +117,11 @@ async function removeLiquidity() {
       const versionedTransaction = new VersionedTransaction(transaction.compileMessage());
       versionedTransaction.sign([userKeypair as any]);
       
-      const txHash = await connection.sendTransaction(versionedTransaction);
+      const txHash = await withRetry(() => connection.sendTransaction(versionedTransaction), 'connection.sendTransaction');
       console.log(`交易 ${i + 1} 哈希:`, txHash);
       
       // 等待确认
-      await connection.getSignatureStatus(txHash, { searchTransactionHistory: true });
+      await withRetry(() => connection.getSignatureStatus(txHash, { searchTransactionHistory: true }), 'connection.getSignatureStatus');
       console.log(`交易 ${i + 1} 已确认`);
     }
     
