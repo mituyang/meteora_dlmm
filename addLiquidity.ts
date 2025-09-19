@@ -215,30 +215,27 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
   if (before) params.set('before', before);
   const url = `${baseUrl}?${params.toString()}`;
 
-  const data = await withRetry<any>(
-    () => new Promise<any>((resolve, reject) => {
-      https.get(url, (res) => {
-        const statusCode = res.statusCode || 0;
-        if (statusCode < 200 || statusCode >= 300) {
-          reject(new Error(`HTTP 状态码 ${statusCode}`));
-          res.resume();
-          return;
+  const data = await new Promise<any>((resolve, reject) => {
+    https.get(url, (res) => {
+      const statusCode = res.statusCode || 0;
+      if (statusCode < 200 || statusCode >= 300) {
+        reject(new Error(`HTTP 状态码 ${statusCode}`));
+        res.resume();
+        return;
+      }
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error('响应解析失败'));
         }
-        let raw = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => { raw += chunk; });
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(raw);
-            resolve(parsed);
-          } catch (e) {
-            reject(new Error('响应解析失败'));
-          }
-        });
-      }).on('error', (e) => reject(e));
-    }),
-    'OKX DEX 1m K线'
-  );
+      });
+    }).on('error', (e) => reject(e));
+  });
 
   console.log('OKX DEX 1m K线（limit=10）响应:');
   console.log(JSON.stringify(data, null, 2));
@@ -536,7 +533,7 @@ async function main() {
     console.log(`使用的POOL_ADDRESS: ${POOL_ADDRESS.toString()}${cliPoolAddress ? ' (来自命令行)' : ' (来自.env)'}`);
     
     // 创建DLMM池实例（带重试）
-    const dlmmPool = await withRetry(() => DLMM.create(connection, POOL_ADDRESS), 'DLMM.create');
+    const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
     
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
@@ -756,53 +753,135 @@ async function main() {
     // console.log('等待 20 秒...');
     // await new Promise(resolve => setTimeout(resolve, 20000));
 
-    // 使用createExtendedEmptyPosition创建大范围仓位
-    const { transaction: createTransaction, positionKeypair } = await withRetry(
-      () => createExtendedEmptyPosition(
-        dlmmPool,
-        userKeypair.publicKey,
-        minBinId,
-        maxBinId
-      ),
-      'dlmmPool.createExtendedEmptyPosition'
-    );
+    // 优先复用已有 positionAddress；否则加锁创建一次并持久化
+    const poolFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.json`);
+    const lockFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.lock`);
+    let existingPositionAddress: string | undefined;
+    try {
+      const raw = fs.readFileSync(poolFile, 'utf8');
+      const json = JSON.parse(raw);
+      if (json && typeof json.positionAddress === 'string' && json.positionAddress.trim().length > 0) {
+        existingPositionAddress = json.positionAddress.trim();
+      }
+    } catch (e) {
+      // 文件不存在或解析失败时忽略，按无地址处理
+    }
 
-    // 发送并确认创建仓位交易
-    console.log('发送创建仓位交易...');
-    createTransaction.sign(userKeypair as any, positionKeypair as any);
-    const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
-    versionedCreateTransaction.sign([userKeypair as any, positionKeypair as any]);
-    const createTxHash = await withRetry(() => connection.sendTransaction(versionedCreateTransaction), 'connection.sendTransaction(create)');
-    console.log('创建交易哈希:', createTxHash);
-    
-    // 等待交易确认
-    console.log('等待交易确认...');
-    let confirmed = false;
-    let attempts = 0;
-    const maxAttempts = 30; // 最多等待30秒
-    
-    while (!confirmed && attempts < maxAttempts) {
-      try {
-        const status = await withRetry(() => connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true }), 'connection.getSignatureStatus(create)');
-        if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
-          confirmed = true;
-          console.log('✅ 创建交易已确认');
-        } else {
-          console.log(`等待确认中... (${attempts + 1}/${maxAttempts})`);
-          await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒
-          attempts++;
+    let positionPubKey: PublicKey | undefined;
+    let createdNewPosition = false;
+    let createTxHash: string | undefined;
+
+    if (existingPositionAddress) {
+      console.log(`🔁 复用已有仓位: ${existingPositionAddress}`);
+      positionPubKey = new PublicKey(existingPositionAddress);
+    } else {
+      // 获取每池互斥锁
+      const lockStart = Date.now();
+      const lockTimeoutMs = 60000; // 最长等待60秒
+      let hasLock = false;
+      while (!hasLock) {
+        try {
+          const fd = fs.openSync(lockFile, 'wx');
+          fs.writeSync(fd, `${process.pid}\n${new Date().toISOString()}`);
+          fs.closeSync(fd);
+          hasLock = true;
+        } catch (_) {
+          // 等待锁期间二次校验 JSON，若已有 positionAddress 则复用
+          try {
+            const raw2 = fs.readFileSync(poolFile, 'utf8');
+            const json2 = JSON.parse(raw2);
+            const addr2 = (json2 && typeof json2.positionAddress === 'string') ? json2.positionAddress.trim() : '';
+            if (addr2) {
+              console.log(`🔁 等锁期间检测到已有仓位，复用: ${addr2}`);
+              positionPubKey = new PublicKey(addr2);
+              break;
+            }
+          } catch (_) {}
+          if (Date.now() - lockStart > lockTimeoutMs) {
+            console.log('⚠️ 获取锁超时，继续执行创建流程');
+            break;
+          }
+          await new Promise(r => setTimeout(r, 500));
         }
-      } catch (error) {
-        console.log(`确认检查失败: ${error}`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        attempts++;
+      }
+
+      // 最终校验一次，避免并发重复创建
+      if (!positionPubKey) {
+        try {
+          const raw3 = fs.readFileSync(poolFile, 'utf8');
+          const json3 = JSON.parse(raw3);
+          const addr3 = (json3 && typeof json3.positionAddress === 'string') ? json3.positionAddress.trim() : '';
+          if (addr3) {
+            console.log(`🔁 创建前最终校验命中已有仓位，复用: ${addr3}`);
+            positionPubKey = new PublicKey(addr3);
+          }
+        } catch (_) {}
+      }
+
+      try {
+        if (!positionPubKey) {
+          console.log('🆕 未发现已有仓位，创建新的扩展空仓位...');
+          const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
+            dlmmPool,
+            userKeypair.publicKey,
+            minBinId,
+            maxBinId
+          );
+
+          // 发送并确认创建仓位交易
+          console.log('发送创建仓位交易...');
+          createTransaction.sign(userKeypair as any, positionKeypair as any);
+          const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
+          versionedCreateTransaction.sign([userKeypair as any, positionKeypair as any]);
+          createTxHash = await connection.sendTransaction(versionedCreateTransaction);
+          console.log('创建交易哈希:', createTxHash);
+
+          // 等待交易确认
+          console.log('等待交易确认...');
+          let confirmed = false;
+          let attempts = 0;
+          const maxAttempts = 30;
+          while (!confirmed && attempts < maxAttempts) {
+            const status = await connection.getSignatureStatus(createTxHash!, { searchTransactionHistory: true });
+            if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+              confirmed = true;
+              console.log('✅ 创建交易已确认');
+            } else {
+              console.log(`等待确认中... (${attempts + 1}/${maxAttempts})`);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              attempts++;
+            }
+          }
+          if (!confirmed) {
+            throw new Error('创建交易确认超时');
+          }
+
+          // 提前持久化 positionAddress（创建确认后、加流动性前）
+          positionPubKey = positionKeypair.publicKey;
+          createdNewPosition = true;
+          try {
+            let jsonW: any = {};
+            try {
+              const rawW = fs.readFileSync(poolFile, 'utf8');
+              jsonW = JSON.parse(rawW);
+            } catch (e) { jsonW = {}; }
+            const posAddr = positionPubKey.toString();
+            jsonW.positionAddress = posAddr;
+            if (jsonW.data && typeof jsonW.data === 'object') {
+              jsonW.data.positionAddress = posAddr;
+            }
+            fs.writeFileSync(poolFile, JSON.stringify(jsonW, null, 2));
+            console.log(`已写入 positionAddress 到 ${poolFile}（创建确认后、加流动性前）`);
+          } catch (e: any) {
+            console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
+          }
+        }
+      } finally {
+        // 释放锁
+        try { fs.unlinkSync(lockFile); } catch (_) {}
       }
     }
-    
-    if (!confirmed) {
-      throw new Error('创建交易确认超时');
-    }
-    
+
     // 使用addLiquidityByStrategy添加流动性
     try {
       const strategy = {
@@ -811,56 +890,56 @@ async function main() {
         maxBinId: maxBinId,
       };
       
-      const addLiquidityTransaction = await withRetry(() => dlmmPool.addLiquidityByStrategy({
-        positionPubKey: positionKeypair.publicKey,
+      const addLiquidityTransaction = await dlmmPool.addLiquidityByStrategy({
+        positionPubKey: positionPubKey!,
         totalXAmount: tokenXAmount,
         totalYAmount: tokenYAmount,
         strategy: strategy,
         user: userKeypair.publicKey,
         slippage: 0.1
-      }), 'dlmmPool.addLiquidityByStrategy');
+      });
       
       // 发送并确认添加流动性交易
       console.log('发送添加流动性交易...');
       addLiquidityTransaction.sign(userKeypair as any);
       const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
       versionedAddLiquidityTransaction.sign([userKeypair as any]);
-      const addLiquidityTxHash = await withRetry(() => connection.sendTransaction(versionedAddLiquidityTransaction), 'connection.sendTransaction(addLiquidity)');
+      const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
       console.log('添加流动性交易哈希:', addLiquidityTxHash);
       
       // 等待交易确认
-      await withRetry(() => connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true }), 'connection.getSignatureStatus(addLiquidity)');
+      await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
       console.log('添加流动性交易已确认');
       
       console.log('=== 交易完成 ===');
-      console.log('仓位地址:', positionKeypair.publicKey.toString());
-      console.log('创建交易:', createTxHash);
+      console.log('仓位地址:', positionPubKey!.toString());
+      if (createTxHash) {
+        console.log('创建交易:', createTxHash);
+      } else {
+        console.log('创建交易: 复用已有仓位，未新建');
+      }
       console.log('添加流动性交易:', addLiquidityTxHash);
       
-      // 将 positionAddress 持久化到对应池子的 JSON 文件中
-      try {
-        const poolFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.json`);
-        let json: any = {};
+      // 仅在创建新仓位时持久化 positionAddress
+      if (createdNewPosition) {
         try {
-          const raw = fs.readFileSync(poolFile, 'utf8');
-          json = JSON.parse(raw);
-        } catch (e) {
-          // 若文件不存在或解析失败，则使用空对象，避免中断主流程
-          json = {};
+          let json: any = {};
+          try {
+            const raw = fs.readFileSync(poolFile, 'utf8');
+            json = JSON.parse(raw);
+          } catch (e) {
+            json = {};
+          }
+          const posAddr = positionPubKey!.toString();
+          json.positionAddress = posAddr;
+          if (json.data && typeof json.data === 'object') {
+            json.data.positionAddress = posAddr;
+          }
+          fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
+          console.log(`已写入 positionAddress 到 ${poolFile}`);
+        } catch (e: any) {
+          console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
         }
-
-        const posAddr = positionKeypair.publicKey.toString();
-        // 记录到顶层便于其他脚本读取
-        json.positionAddress = posAddr;
-        // 同步到 data 区域（若存在）
-        if (json.data && typeof json.data === 'object') {
-          json.data.positionAddress = posAddr;
-        }
-
-        fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
-        console.log(`已写入 positionAddress 到 ${poolFile}`);
-      } catch (e: any) {
-        console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
       }
       
     } catch (error) {

@@ -99,9 +99,9 @@ func main() {
 				}
 			}
 
-			// 处理data目录中的新JSON文件（并发触发，带并发上限与去重）
+			// 处理data目录中的新JSON文件（仅响应Create事件，带并发上限与去重）
 			if strings.HasPrefix(event.Name, dataDir) && strings.HasSuffix(event.Name, ".json") {
-				if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
+				if event.Op&fsnotify.Create == fsnotify.Create {
 					// 去重：只处理一次
 					if _, loaded := processedFiles.LoadOrStore(event.Name, true); !loaded {
 						fmt.Printf("🆕 检测到JSON文件事件: %s, 操作: %v\n", event.Name, event.Op)
@@ -268,8 +268,8 @@ func parseCSVRecord(record []string) *ProfitData {
 
 // processNewJSONFile 处理新创建的JSON文件，执行addLiquidity.ts命令
 func processNewJSONFile(jsonFilePath string) {
-	// 读取JSON文件（失败重试：1秒间隔，最多2次，合计3次尝试）
-	jsonData, err := readFileWithRetry(jsonFilePath)
+	// 读取JSON文件（单次读取）
+	jsonData, err := os.ReadFile(jsonFilePath)
 	if err != nil {
 		log.Printf("读取JSON文件失败: %s, 错误: %v", jsonFilePath, err)
 		return
@@ -320,8 +320,8 @@ func processNewJSONFile(jsonFilePath string) {
 	// 执行命令
 	fmt.Printf("🚀 执行命令: %s\n", strings.Join(cmd.Args, " "))
 
-	// 执行命令并捕获输出（失败重试：1秒间隔，最多2次，合计3次尝试）
-	output, err := runCmdWithRetry(cmd)
+	// 执行命令并捕获输出（单次执行）
+	output, err := cmd.CombinedOutput()
 
 	// 实时显示输出
 	fmt.Print(string(output))
@@ -334,94 +334,84 @@ func processNewJSONFile(jsonFilePath string) {
 
 	fmt.Printf("✅ addLiquidity.ts执行成功\n")
 
-	// 从输出中提取仓位地址（形如：仓位地址: <base58>）
-	positionAddr := extractPositionAddress(string(output))
-	if positionAddr == "" {
-		log.Printf("⚠️ 未在输出中找到仓位地址，跳过奖励定时任务: %s", jsonFilePath)
-		return
-	}
-
-	// 启动每分钟执行一次 claimAllRewards.ts 的定时任务（同一 pool+position 仅启动一次）
-	key := fmt.Sprintf("%s|%s", poolAddress, positionAddr)
+	// 使用池地址作为唯一键；仓位地址在执行时从 JSON 读取
+	key := poolAddress
 	if _, loaded := scheduledRewards.LoadOrStore(key, true); loaded {
 		fmt.Printf("⏱️ 已存在定时任务: %s\n", key)
 		return
 	}
-	fmt.Printf("⏱️ 启动领取奖励定时任务(每1分钟): pool=%s, position=%s\n", poolAddress, positionAddr)
-	go startClaimRewardsTicker(poolAddress, positionAddr)
+	fmt.Printf("⏱️ 启动领取奖励定时任务(每1分钟): pool=%s\n", poolAddress)
+	go startClaimRewardsTicker(poolAddress)
 }
 
-// extractPositionAddress 从 addLiquidity.ts 输出中解析仓位地址
-func extractPositionAddress(output string) string {
-	// 可能的格式："仓位地址: <addr>" 或 "仓位地址：<addr>"
-	// 简单按换行拆分并查找包含关键词的行
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "仓位地址") {
-			// 去掉提示文字与分隔符
-			line = strings.ReplaceAll(line, "仓位地址:", "")
-			line = strings.ReplaceAll(line, "仓位地址：", "")
-			candidate := strings.TrimSpace(line)
-			// 粗略校验：Base58 字符集子集，长度>20
-			if len(candidate) > 20 && !strings.ContainsAny(candidate, " \t") {
-				return candidate
-			}
+// startClaimRewardsTicker 每分钟执行一次 claimAllRewards.ts
+func startClaimRewardsTicker(poolAddress string) {
+	key := poolAddress
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	// 立即执行一次；若获取不到 positionAddress，则停止任务并移除标记
+	if ok := runClaimRewards(poolAddress); !ok {
+		log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
+		scheduledRewards.Delete(key)
+		return
+	}
+
+	// 每分钟执行；若过程中读取不到 positionAddress，则停止任务并移除标记
+	for range ticker.C {
+		if ok := runClaimRewards(poolAddress); !ok {
+			log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
+			scheduledRewards.Delete(key)
+			return
+		}
+	}
+}
+
+// runClaimRewards 执行领取奖励脚本
+
+// 从 data/<pool>.json 读取 positionAddress（优先顶层，其次 data.positionAddress）
+func readPositionFromPoolJSON(poolAddress string) string {
+	dataPath := "/Users/yqw/meteora_dlmm/data/" + poolAddress + ".json"
+	bytes, err := os.ReadFile(dataPath)
+	if err != nil {
+		log.Printf("读取池JSON失败: %s, 错误: %v", dataPath, err)
+		return ""
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(bytes, &obj); err != nil {
+		log.Printf("解析池JSON失败: %s, 错误: %v", dataPath, err)
+		return ""
+	}
+	if v, ok := obj["positionAddress"].(string); ok && v != "" {
+		return v
+	}
+	if m, ok := obj["data"].(map[string]interface{}); ok {
+		if v, ok := m["positionAddress"].(string); ok && v != "" {
+			return v
 		}
 	}
 	return ""
 }
 
-// startClaimRewardsTicker 每分钟执行一次 claimAllRewards.ts
-func startClaimRewardsTicker(poolAddress, positionAddress string) {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	// 立即执行一次，然后每分钟执行
-	runClaimRewards(poolAddress, positionAddress)
-	for range ticker.C {
-		runClaimRewards(poolAddress, positionAddress)
+func runClaimRewards(poolAddress string) bool {
+	// 仅从 JSON 读取 positionAddress
+	positionAddress := readPositionFromPoolJSON(poolAddress)
+	if positionAddress == "" {
+		// 返回 false 以通知上层停止定时任务
+		return false
 	}
-}
-
-// runClaimRewards 执行领取奖励脚本
-func runClaimRewards(poolAddress, positionAddress string) {
 	cmd := exec.Command("npx", "ts-node", "claimAllRewards.ts",
 		fmt.Sprintf("--pool=%s", poolAddress),
-		fmt.Sprintf("--position=%s", positionAddress),
 	)
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
-	fmt.Printf("▶️  执行领取奖励: %s\n", strings.Join(cmd.Args, " "))
-	// 执行命令（失败重试：1秒间隔，最多2次，合计3次尝试）
-	out, err := runCmdWithRetry(cmd)
+	fmt.Printf("▶️  执行领取奖励: %s (position 来自 JSON)\n", strings.Join(cmd.Args, " "))
+	// 执行命令（单次执行）
+	out, err := cmd.CombinedOutput()
 	fmt.Print(string(out))
 	if err != nil {
 		log.Printf("领取奖励执行失败: %v", err)
 	}
+	return true
 }
 
-// readFileWithRetry 以1秒间隔重试读取文件，最多2次（总3次）
-func readFileWithRetry(path string) ([]byte, error) {
-	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		if attempt < 3 {
-			log.Printf("获取失败，1秒后重试(%d/2) -> 读取文件: %s, 错误: %v", attempt, path, err)
-			time.Sleep(1 * time.Second)
-		}
-	}
-	return nil, lastErr
-}
-
-// runCmdWithRetry 以1秒间隔重试执行命令，最多2次（总3次）
-func runCmdWithRetry(cmd *exec.Cmd) ([]byte, error) {
-	// 改为仅执行一次，不做重试
-	newCmd := exec.Command(cmd.Path, cmd.Args[1:]...)
-	newCmd.Env = cmd.Env
-	newCmd.Dir = cmd.Dir
-	out, err := newCmd.CombinedOutput()
-	return out, err
-}
+// 删除重试逻辑：不再保留 readFileWithRetry 和 runCmdWithRetry
