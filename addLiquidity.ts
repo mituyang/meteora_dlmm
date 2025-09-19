@@ -109,8 +109,8 @@ function calculateDynamicLeftBins(bin_step: number): number {
   // 使用对数计算：leftBins = log(targetValue) / log(baseValue)
   const leftBins = Math.log(targetValue) / Math.log(baseValue);
   
-  // 返回向上取整的整数，+5是为了抵御价格波动
-  return Math.ceil(leftBins) + 5;
+  // 返回向上取整的整数，+1bin
+  return Math.ceil(leftBins) + 1;
 }
 
 /**
@@ -341,6 +341,55 @@ function calculateBinsFromLastUpdatedFirst(
 }
 
 /**
+ * 新的bin范围计算方式
+ * 当最新价格 > 收盘价时使用
+ * @param latestPrice 最新价格
+ * @param cPrice 收盘价
+ * @param activeId 当前活跃bin ID
+ * @param binStep bin步长
+ * @returns bin范围
+ */
+function calculateNewBinRange(
+  latestPrice: number,
+  cPrice: number,
+  activeId: number,
+  binStep: number
+): { minBinId: number; maxBinId: number } {
+  console.log(`🔄 新bin计算方式:`);
+  console.log(`- 最新价格: ${latestPrice}`);
+  console.log(`- 收盘价: ${cPrice}`);
+  console.log(`- 价格涨幅: ${((latestPrice - cPrice) / cPrice * 100).toFixed(2)}%`);
+  
+  // 计算新的targetValue: 1 - (latestPriceNum - cPriceNum) / latestPriceNum
+  const priceChangeRatio = (latestPrice - cPrice) / latestPrice;
+  const targetValue = 1 - priceChangeRatio;
+  
+  console.log(`- 价格变化比例: ${(priceChangeRatio * 100).toFixed(2)}%`);
+  console.log(`- 新targetValue: ${targetValue.toFixed(6)}`);
+  
+  // 基础值：1 - bin_step/10000
+  const baseValue = 1 - binStep / 10000;
+  
+  // 使用对数计算：leftBins = log(targetValue) / log(baseValue)
+  const leftBins = Math.log(targetValue) / Math.log(baseValue);
+  const leftBinsCeiled = Math.ceil(leftBins) + 1;
+  
+  console.log(`- 基础值: ${baseValue.toFixed(6)}`);
+  console.log(`- 计算leftBins: ${leftBins.toFixed(2)}`);
+  console.log(`- 向上取整+1: ${leftBinsCeiled}`);
+  
+  // 计算bin范围
+  const maxBinId = activeId - leftBinsCeiled;
+  const standardLeftBins = calculateDynamicLeftBins(binStep);
+  const minBinId = maxBinId - standardLeftBins;
+  
+  console.log(`- maxBinId = activeId - leftBins = ${activeId} - ${leftBinsCeiled} = ${maxBinId}`);
+  console.log(`- minBinId = maxBinId - standardLeftBins = ${maxBinId} - ${standardLeftBins} = ${minBinId}`);
+  
+  return { minBinId, maxBinId };
+}
+
+/**
  * 完整的BidAsk策略流程（支持大于70个bins）
  * @param dlmmPool DLMM池实例
  * @param userKeypair 用户密钥对
@@ -461,9 +510,6 @@ async function main() {
     // 创建DLMM池实例
     const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
     
-    // 获取当前活跃Bin ID
-    const activeId = dlmmPool.lbPair.activeId;
-    
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
     
@@ -472,40 +518,36 @@ async function main() {
     const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
     // 计算Bin ID范围
-    let minBinId: number;
-    let maxBinId: number;
+    let minBinId: number = 0;
+    let maxBinId: number = 0;
     const binStep = dlmmPool.lbPair.binStep;
+    let binRangeCalculated = false; // 标记是否已通过价格比较计算bin范围
 
     // 新模式：基于 last_updated_first（仅命令行输入），默认启用
     const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
     if (binRangeMode === 'last_updated_first' && lastUpdatedFirst) {
-      const result = calculateBinsFromLastUpdatedFirst(lastUpdatedFirst, activeId, binStep);
-      minBinId = result.minBinId;
-      maxBinId = result.maxBinId;
-      console.log(`🔢 last_updated_first 模式计算 Bin ID 范围:`);
-      console.log(`- Active ID: ${activeId}`);
+      // 注意：如果启用了OKX且提供了token地址，bin范围将在价格比较后计算
+      // 这里先不计算，等待价格比较逻辑
+      const initialActiveId = dlmmPool.lbPair.activeId;
+      console.log(`🔢 last_updated_first 模式准备计算 Bin ID 范围:`);
+      console.log(`- Active ID: ${initialActiveId} (初始获取)`);
       console.log(`- Bin Step: ${binStep} (从池中获取)`);
       console.log(`- last_updated_first: ${lastUpdatedFirst}`);
-      console.log(`- Min Bin ID: ${minBinId}`);
-      console.log(`- Max Bin ID: ${maxBinId}`);
-      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
     } else {
       // 兼容旧逻辑：自动从 activeId 向左扩展
+      // 实时获取当前活跃Bin ID，确保时效性
+      const currentActiveId = dlmmPool.lbPair.activeId;
       const leftBins = calculateDynamicLeftBins(binStep);
-      maxBinId = activeId - 1;  // activeId-1为maxBinId
-      minBinId = activeId - leftBins;  // activeId-leftBins为minBinId
+      maxBinId = currentActiveId - 1;  // activeId-1为maxBinId
+      minBinId = currentActiveId - leftBins;  // activeId-leftBins为minBinId
+      binRangeCalculated = true;
       console.log(`🔢 自动计算Bin ID范围:`);
-      console.log(`- Active ID: ${activeId}`);
+      console.log(`- Active ID: ${currentActiveId} (实时获取)`);
       console.log(`- Bin Step: ${binStep} (从池中获取)`);
       console.log(`- 左侧Bins数量: ${leftBins}`);
       console.log(`- Min Bin ID: ${minBinId}`);
       console.log(`- Max Bin ID: ${maxBinId}`);
       console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
-    }
-    
-    // 验证activeId是否大于或等于maxBinId
-    if (activeId < maxBinId) {
-        throw new Error(`activeId (${activeId}) 必须大于或等于 maxBinId (${maxBinId})`);
     } 
     
     // 创建用户密钥对（仅支持加密私钥，解密后为Base58格式）
@@ -568,10 +610,12 @@ async function main() {
     const enableOkxFlag = resolveEnableOkxFromArgs();
     const enableOkxEnv = (process.env.ENABLE_OKX || '').toLowerCase();
     const enableOkx = enableOkxFlag ?? (enableOkxEnv === '1' || enableOkxEnv === 'true' || enableOkxEnv === 'yes' || enableOkxEnv === 'on');
+    let latestPrice: string | undefined;
+    
     if (enableOkx && tokenFromCli) {
       // 先尝试获取最新价格（不阻塞 K 线）
       try {
-        const latestPrice = await fetchOkxLatestPrice(tokenFromCli);
+        latestPrice = await fetchOkxLatestPrice(tokenFromCli);
         if (latestPrice !== undefined) {
           console.log('OKX DEX 最新价格:', latestPrice);
         } else {
@@ -594,6 +638,50 @@ async function main() {
             if (hit) {
               const c = hit[4];
               console.log(`last_updated_first 命中收盘价(c): ${c}`);
+              
+              // 使用已经获取到的最新价格进行比较（避免重复API请求）
+              if (latestPrice !== undefined) {
+                // 实时获取当前活跃Bin ID，确保时效性
+                const currentActiveId = dlmmPool.lbPair.activeId;
+                const latestPriceNum = parseFloat(latestPrice);
+                const cPriceNum = parseFloat(c);
+                
+                console.log(`价格比较:`);
+                console.log(`- 收盘价(c): ${cPriceNum}`);
+                console.log(`- 最新价格: ${latestPriceNum}`);
+                console.log(`- 当前Active ID: ${currentActiveId} (实时获取)`);
+                
+                if (latestPriceNum <= cPriceNum) {
+                  console.log(`✅ 最新价格 <= 收盘价，使用自动模式计算bin范围`);
+                  // 使用自动模式计算bin范围
+                  const leftBins = calculateDynamicLeftBins(binStep);
+                  minBinId = currentActiveId - leftBins;
+                  maxBinId = currentActiveId - 1;
+                  binRangeCalculated = true;
+                  console.log(`🔢 自动模式Bin ID范围:`);
+                  console.log(`- Active ID: ${currentActiveId}`);
+                  console.log(`- Bin Step: ${binStep}`);
+                  console.log(`- 左侧Bins数量: ${leftBins}`);
+                  console.log(`- Min Bin ID: ${minBinId}`);
+                  console.log(`- Max Bin ID: ${maxBinId}`);
+                  console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+                } else {
+                  console.log(`✅ 最新价格 > 收盘价，使用新的计算bin范围方式`);
+                  // 使用新的计算bin范围方式
+                  const result = calculateNewBinRange(latestPriceNum, cPriceNum, currentActiveId, binStep);
+                  minBinId = result.minBinId;
+                  maxBinId = result.maxBinId;
+                  binRangeCalculated = true;
+                  console.log(`🔢 新方式Bin ID范围:`);
+                  console.log(`- Active ID: ${currentActiveId}`);
+                  console.log(`- Bin Step: ${binStep}`);
+                  console.log(`- Min Bin ID: ${minBinId}`);
+                  console.log(`- Max Bin ID: ${maxBinId}`);
+                  console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+                }
+              } else {
+                console.log('未获取到最新价格，使用默认的last_updated_first模式');
+              }
             } else {
               console.log('未在 K 线中找到匹配时间戳');
             }
@@ -611,10 +699,33 @@ async function main() {
         console.log('未提供 tokenContractAddress（--token= 或 --token-address=），跳过 OKX DEX 抓取');
       }
     }
+    
+    // 如果还没有计算bin范围，使用默认的last_updated_first模式
+    if (!binRangeCalculated && binRangeMode === 'last_updated_first' && lastUpdatedFirst) {
+      // 实时获取当前活跃Bin ID，确保时效性
+      const currentActiveId = dlmmPool.lbPair.activeId;
+      const result = calculateBinsFromLastUpdatedFirst(lastUpdatedFirst, currentActiveId, binStep);
+      minBinId = result.minBinId;
+      maxBinId = result.maxBinId;
+      binRangeCalculated = true;
+      console.log(`🔢 默认last_updated_first模式计算 Bin ID 范围:`);
+      console.log(`- Active ID: ${currentActiveId} (实时获取)`);
+      console.log(`- Bin Step: ${binStep} (从池中获取)`);
+      console.log(`- last_updated_first: ${lastUpdatedFirst}`);
+      console.log(`- Min Bin ID: ${minBinId}`);
+      console.log(`- Max Bin ID: ${maxBinId}`);
+      console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+    }
+    
+    // 验证activeId是否大于或等于maxBinId（在所有bin范围计算完成后）
+    const finalActiveId = dlmmPool.lbPair.activeId;
+    if (finalActiveId < maxBinId) {
+        throw new Error(`activeId (${finalActiveId}) 必须大于或等于 maxBinId (${maxBinId})`);
+    }
 
     // 等待一段时间
-    // console.log('等待 20 秒...');
-    // await new Promise(resolve => setTimeout(resolve, 20000));
+    console.log('等待 20 秒...');
+    await new Promise(resolve => setTimeout(resolve, 20000));
 
     // 使用createExtendedEmptyPosition创建大范围仓位
     const { transaction: createTransaction, positionKeypair } = await createExtendedEmptyPosition(
