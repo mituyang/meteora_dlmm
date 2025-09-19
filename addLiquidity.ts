@@ -663,6 +663,26 @@ async function main() {
             if (hit) {
               const c = hit[4];
               console.log(`last_updated_first 命中收盘价(c): ${c}`);
+              // 将收盘价(c)持久化到 data/<pool>.json（顶层 c 与 data.c 同步，逻辑与 positionAddress 相似）
+              try {
+                const poolFileForC = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.json`);
+                let jsonC: any = {};
+                try {
+                  const rawC = fs.readFileSync(poolFileForC, 'utf8');
+                  jsonC = JSON.parse(rawC);
+                } catch (_) {
+                  jsonC = {};
+                }
+                const cStr = String(c);
+                jsonC.c = cStr;
+                if (jsonC.data && typeof jsonC.data === 'object') {
+                  jsonC.data.c = cStr;
+                }
+                fs.writeFileSync(poolFileForC, JSON.stringify(jsonC, null, 2));
+                console.log(`已写入 收盘价(c) 到 ${poolFileForC}`);
+              } catch (e: any) {
+                console.log('写入 收盘价(c) 到 JSON 失败:', e?.message || String(e));
+              }
               
               // 使用已经获取到的最新价格进行比较（避免重复API请求）
               if (latestPrice !== undefined) {

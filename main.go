@@ -27,7 +27,7 @@ var processedFiles sync.Map
 var scheduledRewards sync.Map
 
 func main() {
-	csvPath := "/Users/yqw/dlmm_8_27/data/profit.csv"
+	csvPath := "/Users/yqw/dlmm_8_27/data/auto_profit.csv"
 	dataDir := "/Users/yqw/meteora_dlmm/data"
 
 	// 确保data目录存在
