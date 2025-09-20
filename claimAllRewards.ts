@@ -177,13 +177,17 @@ async function claimAllRewardsByPosition() {
     // 获取代币精度
     const getTokenDecimals = async (mintAddress: PublicKey): Promise<number> => {
       try {
+        console.log(`🔄 正在获取代币精度: ${mintAddress.toString()}`);
         const tokenInfo = await connection.getParsedAccountInfo(mintAddress);
         if (tokenInfo.value?.data && 'parsed' in tokenInfo.value.data) {
-          return tokenInfo.value.data.parsed.info.decimals;
+          const decimals = tokenInfo.value.data.parsed.info.decimals;
+          console.log(`✅ 代币 ${mintAddress.toString()} 精度: ${decimals}`);
+          return decimals;
         }
+        console.log(`⚠️ 无法解析代币信息，使用默认精度 0: ${mintAddress.toString()}`);
         return 0;
       } catch (error) {
-        console.error('获取代币精度失败:', error);
+        console.error(`❌ 获取代币精度失败: ${mintAddress.toString()}`, error);
         return 0;
       }
     };
@@ -200,13 +204,15 @@ async function claimAllRewardsByPosition() {
     };
 
     // 获取代币精度
+    console.log(`X代币地址: ${dlmmPool.lbPair.tokenXMint.toString()}`);
+    console.log(`Y代币地址: ${dlmmPool.lbPair.tokenYMint.toString()}`);
     const tokenXDecimals = await getTokenDecimals(dlmmPool.lbPair.tokenXMint);  // X 精度
     const tokenYDecimals = await getTokenDecimals(dlmmPool.lbPair.tokenYMint);  // SOL 精度
     
     // 先读取池名称以获取 X 代币名称
     const poolJson = readPoolJson(poolAddress.toString());
-    const poolName = poolJson?.poolName || 'UNKNOWN-SOL';
-    const xTokenName = poolName.replace('-SOL', '');  // 例如 "GS-SOL" -> "GS"
+    const poolName = poolJson?.data?.poolName || poolJson?.poolName || 'UNKNOWN-SOL';
+    const xTokenName = poolName.replace('-SOL', '');  // 例如 "BLESS-SOL" -> "BLESS"
     
     console.log(`${xTokenName} 代币精度:`, tokenXDecimals);
     console.log('SOL 代币精度:', tokenYDecimals);
