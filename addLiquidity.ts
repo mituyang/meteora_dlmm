@@ -734,7 +734,8 @@ async function main() {
                 return; // 直接停止，不再继续默认 last_updated_first 模式
               }
             } else {
-              console.log('未在 K 线中找到匹配时间戳');
+              console.log('❌ 未在 K 线中找到匹配时间戳，停止添加流动性');
+              return; // 停止添加流动性
             }
           } catch (e) {
             console.log('解析 last_updated_first 失败:', e instanceof Error ? e.message : String(e));
