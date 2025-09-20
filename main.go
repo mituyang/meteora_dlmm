@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -26,7 +29,29 @@ var csvHeaders []string
 var processedFiles sync.Map
 var scheduledRewards sync.Map
 
+// 全局上下文和取消函数，用于优雅关闭
+var (
+	globalCtx    context.Context
+	globalCancel context.CancelFunc
+	shutdownWg   sync.WaitGroup
+)
+
 func main() {
+	// 创建可取消的上下文
+	globalCtx, globalCancel = context.WithCancel(context.Background())
+	defer globalCancel()
+
+	// 设置信号处理
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// 启动信号处理goroutine
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("\n🛑 收到信号 %v，开始优雅关闭...\n", sig)
+		globalCancel()
+	}()
+
 	csvPath := "/Users/yqw/dlmm_8_27/data/auto_profit.csv"
 	dataDir := "/Users/yqw/meteora_dlmm/data"
 
@@ -52,7 +77,11 @@ func main() {
 	fmt.Printf("当前行数: %d\n", currentLineCount)
 
 	// 启动价格获取定时任务
-	go startPriceFetcherTicker()
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		startPriceFetcherTicker()
+	}()
 
 	// 创建文件监听器
 	watcher, err := fsnotify.NewWatcher()
@@ -80,6 +109,13 @@ func main() {
 	// 监听事件
 	for {
 		select {
+		case <-globalCtx.Done():
+			fmt.Println("🛑 收到关闭信号，停止文件监听...")
+			watcher.Close()
+			fmt.Println("⏳ 等待所有goroutine完成...")
+			shutdownWg.Wait()
+			fmt.Println("✅ 程序已优雅关闭")
+			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
@@ -344,7 +380,11 @@ func processNewJSONFile(jsonFilePath string) {
 		return
 	}
 	fmt.Printf("⏱️ 启动领取奖励定时任务(每1分钟): pool=%s\n", poolAddress)
-	go startClaimRewardsTicker(poolAddress)
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		startClaimRewardsTicker(poolAddress)
+	}()
 }
 
 // startClaimRewardsTicker 每分钟执行一次 claimAllRewards.ts
@@ -361,11 +401,18 @@ func startClaimRewardsTicker(poolAddress string) {
 	}
 
 	// 每分钟执行；若过程中读取不到 positionAddress，则停止任务并移除标记
-	for range ticker.C {
-		if ok := runClaimRewards(poolAddress); !ok {
-			log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
+	for {
+		select {
+		case <-globalCtx.Done():
+			log.Printf("🛑 收到关闭信号，停止领取奖励定时任务: pool=%s", poolAddress)
 			scheduledRewards.Delete(key)
 			return
+		case <-ticker.C:
+			if ok := runClaimRewards(poolAddress); !ok {
+				log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
+				scheduledRewards.Delete(key)
+				return
+			}
 		}
 	}
 }
@@ -559,8 +606,14 @@ func startPriceFetcherTicker() {
 	initialDelay := nextTarget.Sub(now)
 	fmt.Printf("⏰ 距离下次价格获取还有: %v\n", initialDelay.Round(time.Second))
 
-	// 等待到下一个01秒
-	time.Sleep(initialDelay)
+	// 等待到下一个01秒，但可以被取消
+	select {
+	case <-globalCtx.Done():
+		fmt.Println("🛑 收到关闭信号，停止价格获取定时任务")
+		return
+	case <-time.After(initialDelay):
+		// 继续执行
+	}
 
 	// 立即执行一次
 	executePriceFetch()
@@ -569,8 +622,14 @@ func startPriceFetcherTicker() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		executePriceFetch()
+	for {
+		select {
+		case <-globalCtx.Done():
+			fmt.Println("🛑 收到关闭信号，停止价格获取定时任务")
+			return
+		case <-ticker.C:
+			executePriceFetch()
+		}
 	}
 }
 
@@ -586,18 +645,15 @@ func executePriceFetch() {
 
 	fmt.Printf("📊 找到 %d 个token需要获取价格\n", len(tokenAddresses))
 
-	// 并发获取所有token的价格
-	var wg sync.WaitGroup
+	// 顺序获取所有token的价格（避免OKX API限制）
 	for poolAddress, tokenAddress := range tokenAddresses {
-		wg.Add(1)
-		go func(pool, token string) {
-			defer wg.Done()
-			fetchPriceForToken(pool, token)
-		}(poolAddress, tokenAddress)
+		fmt.Printf("🔄 正在获取价格: %s -> %s\n", poolAddress, tokenAddress)
+		fetchPriceForToken(poolAddress, tokenAddress)
+
+		// 添加延迟避免API限制
+		time.Sleep(1100 * time.Millisecond)
 	}
 
-	// 等待所有价格获取完成
-	wg.Wait()
 	fmt.Printf("✅ 本轮价格获取完成 - %s\n", time.Now().Format("15:04:05"))
 }
 

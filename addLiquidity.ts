@@ -640,6 +640,7 @@ async function main() {
     if (enableOkx && tokenFromCli) {
       // 先尝试获取最新价格（不阻塞 K 线）
       try {
+        console.log('🔄 正在获取OKX最新价格...');
         latestPrice = await fetchOkxLatestPrice(tokenFromCli);
         if (latestPrice !== undefined) {
           console.log('OKX DEX 最新价格:', latestPrice);
@@ -650,8 +651,12 @@ async function main() {
         console.log('获取 OKX 最新价格失败:', e instanceof Error ? e.message : String(e));
       }
 
+      // 添加延迟避免API限制
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
       // 再获取 K 线
       try {
+        console.log('🔄 正在获取OKX K线数据...');
         const kline = await fetchOkxCandles(tokenFromCli);
         const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
         if (lastUpdatedFirst) {

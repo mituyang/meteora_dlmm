@@ -217,6 +217,7 @@ async function main() {
     console.log(`使用的TOKEN_ADDRESS: ${tokenAddress}`);
     
     // 获取最新价格
+    console.log('🔄 正在获取OKX最新价格...');
     const latestPrice = await fetchOkxLatestPrice(tokenAddress);
     if (latestPrice !== undefined) {
       console.log('OKX DEX 最新价格:', latestPrice);
