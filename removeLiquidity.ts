@@ -17,6 +17,30 @@ dotenv.config();
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
 
+// 命令行参数解析
+const argv = process.argv.slice(2);
+
+// 清理字符串，移除引号和多余空格
+function sanitizeString(str: string): string {
+  return str.replace(/['"]/g, '').trim();
+}
+
+// 从命令行参数中获取池地址
+function getPoolFromArgs(): string | null {
+  for (const arg of argv) {
+    if (arg.startsWith('--pool=')) return sanitizeString(arg.split('=')[1]);
+  }
+  return null;
+}
+
+// 从命令行参数中获取仓位地址
+function getPositionFromArgs(): string | null {
+  for (const arg of argv) {
+    if (arg.startsWith('--position=')) return sanitizeString(arg.split('=')[1]);
+  }
+  return null;
+}
+
 /**
  * 解密私钥
  * @param encryptedPrivateKey 加密的私钥
@@ -51,16 +75,43 @@ async function withRetry<T>(fn: () => Promise<T>, desc: string): Promise<T> {
 }
 
 /**
+ * 验证Solana地址格式
+ * @param address 地址字符串
+ * @param name 地址名称（用于错误信息）
+ */
+function validateSolanaAddress(address: string, name: string): void {
+  try {
+    new PublicKey(address);
+  } catch (error) {
+    throw new Error(`${name}格式无效: ${address}`);
+  }
+}
+
+/**
  * 移除流动性的基本用法
  */
 async function removeLiquidity() {
   try {
-    // 1. 创建DLMM池实例
-    const poolAddress = new PublicKey(process.env.POOL_ADDRESS!);
-    const dlmmPool = await withRetry(() => DLMM.create(connection, poolAddress), 'DLMM.create');
+    // 1. 获取池地址（命令行参数 > 环境变量）
+    const finalPoolAddress = getPoolFromArgs() || process.env.POOL_ADDRESS;
+    if (!finalPoolAddress) {
+      throw new Error('缺少必需的池地址：请通过 --pool= 传入，或在环境变量中设置 POOL_ADDRESS');
+    }
     
-    // 2. 仓位信息
-    const positionPubKey = new PublicKey(process.env.POSITION_ADDRESS!);
+    // 验证池地址格式
+    validateSolanaAddress(finalPoolAddress, '池地址');
+    const poolPubKey = new PublicKey(finalPoolAddress);
+    const dlmmPool = await withRetry(() => DLMM.create(connection, poolPubKey), 'DLMM.create');
+    
+    // 2. 获取仓位地址（命令行参数 > 环境变量）
+    const finalPositionAddress = getPositionFromArgs() || process.env.POSITION_ADDRESS;
+    if (!finalPositionAddress) {
+      throw new Error('缺少必需的仓位地址：请通过 --position= 传入，或在环境变量中设置 POSITION_ADDRESS');
+    }
+    
+    // 验证仓位地址格式
+    validateSolanaAddress(finalPositionAddress, '仓位地址');
+    const positionPubKey = new PublicKey(finalPositionAddress);
     
     // 3. 创建用户密钥对
     let userKeypair: Keypair;
@@ -91,7 +142,7 @@ async function removeLiquidity() {
     console.log('=== 移除流动性 ===');
     console.log('用户地址:', process.env.USER_WALLET_ADDRESS);
     console.log('仓位地址:', positionPubKey.toString());
-    console.log('池地址:', poolAddress.toString());
+    console.log('池地址:', poolPubKey.toString());
     console.log('Bin范围:', `${lowerBinId} - ${upperBinId}`);
     
     // 5. 调用removeLiquidity方法 - 默认移除所有流动性

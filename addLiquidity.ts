@@ -237,8 +237,8 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
     }).on('error', (e) => reject(e));
   });
 
-  console.log('OKX DEX 1m K线（limit=10）响应:');
-  console.log(JSON.stringify(data, null, 2));
+  // console.log('OKX DEX 1m K线（limit=10）响应:');
+  // console.log(JSON.stringify(data, null, 2));
   return data;
 }
 

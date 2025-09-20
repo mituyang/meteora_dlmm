@@ -51,6 +51,9 @@ func main() {
 	fmt.Printf("CSV字段数: %d\n", len(csvHeaders))
 	fmt.Printf("当前行数: %d\n", currentLineCount)
 
+	// 启动价格获取定时任务
+	go startPriceFetcherTicker()
+
 	// 创建文件监听器
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -412,6 +415,190 @@ func runClaimRewards(poolAddress string) bool {
 		log.Printf("领取奖励执行失败: %v", err)
 	}
 	return true
+}
+
+// 从 data/<pool>.json 读取 tokenContractAddress（ca字段）
+func readTokenContractAddressFromPoolJSON(poolAddress string) string {
+	dataPath := "/Users/yqw/meteora_dlmm/data/" + poolAddress + ".json"
+	bytes, err := os.ReadFile(dataPath)
+	if err != nil {
+		log.Printf("读取池JSON失败: %s, 错误: %v", dataPath, err)
+		return ""
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(bytes, &obj); err != nil {
+		log.Printf("解析池JSON失败: %s, 错误: %v", dataPath, err)
+		return ""
+	}
+
+	// 优先从顶层ca字段读取
+	if v, ok := obj["ca"].(string); ok && v != "" {
+		return v
+	}
+
+	// 其次从data.ca字段读取
+	if m, ok := obj["data"].(map[string]interface{}); ok {
+		if v, ok := m["ca"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// 从 data/<pool>.json 读取 poolName
+func readPoolNameFromPoolJSON(poolAddress string) string {
+	dataPath := "/Users/yqw/meteora_dlmm/data/" + poolAddress + ".json"
+	bytes, err := os.ReadFile(dataPath)
+	if err != nil {
+		return ""
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(bytes, &obj); err != nil {
+		return ""
+	}
+
+	// 优先从顶层poolName字段读取
+	if v, ok := obj["poolName"].(string); ok && v != "" {
+		return v
+	}
+
+	// 其次从data.poolName字段读取
+	if m, ok := obj["data"].(map[string]interface{}); ok {
+		if v, ok := m["poolName"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// 获取所有池的tokenContractAddress
+func getAllTokenContractAddresses() map[string]string {
+	tokenAddresses := make(map[string]string)
+	dataDir := "/Users/yqw/meteora_dlmm/data"
+
+	files, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Printf("读取data目录失败: %v", err)
+		return tokenAddresses
+	}
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		// 提取poolAddress（去掉.json后缀）
+		poolAddress := strings.TrimSuffix(file.Name(), ".json")
+		tokenAddress := readTokenContractAddressFromPoolJSON(poolAddress)
+
+		if tokenAddress != "" {
+			tokenAddresses[poolAddress] = tokenAddress
+		}
+	}
+
+	return tokenAddresses
+}
+
+// 执行价格获取命令（仅获取价格，不执行交易）
+func fetchPriceForToken(poolAddress, tokenContractAddress string) {
+	// 使用专门的价格获取脚本
+	cmd := exec.Command("npx", "ts-node", "fetchPrice.ts",
+		fmt.Sprintf("--pool=%s", poolAddress),
+		fmt.Sprintf("--token=%s", tokenContractAddress))
+	cmd.Dir = "/Users/yqw/meteora_dlmm"
+
+	// 执行命令并捕获输出
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+
+	// 解析输出，提取价格信息
+	var finalPrice string
+	lines := strings.Split(outputStr, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "price:") {
+			// 提取价格值
+			parts := strings.Split(line, "price:")
+			if len(parts) > 1 {
+				finalPrice = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
+	// 获取poolName
+	poolName := readPoolNameFromPoolJSON(poolAddress)
+	if poolName == "" {
+		poolName = "未知池"
+	}
+
+	// 输出价格信息
+	if finalPrice != "" {
+		fmt.Printf("💰 最终价格: %s\n", finalPrice)
+		fmt.Printf("✅ 价格获取成功 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
+	} else {
+		fmt.Printf("❌ 价格获取失败 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
+		if err != nil {
+			log.Printf("错误详情: %v", err)
+		}
+	}
+}
+
+// 启动价格获取定时任务
+func startPriceFetcherTicker() {
+	fmt.Println("🕐 启动价格获取定时任务（每分钟01秒）")
+
+	// 计算到下一个01秒的时间
+	now := time.Now()
+	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
+	nextTarget := nextMinute.Add(time.Second) // 01秒
+
+	// 如果当前时间已经过了这分钟的01秒，则等到下一分钟的01秒
+	if now.After(nextTarget) {
+		nextTarget = nextTarget.Add(time.Minute)
+	}
+
+	initialDelay := nextTarget.Sub(now)
+	fmt.Printf("⏰ 距离下次价格获取还有: %v\n", initialDelay.Round(time.Second))
+
+	// 等待到下一个01秒
+	time.Sleep(initialDelay)
+
+	// 立即执行一次
+	executePriceFetch()
+
+	// 然后每分钟的01秒执行
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		executePriceFetch()
+	}
+}
+
+// 执行价格获取
+func executePriceFetch() {
+	fmt.Printf("🔄 开始价格获取 - %s\n", time.Now().Format("15:04:05"))
+
+	tokenAddresses := getAllTokenContractAddresses()
+	if len(tokenAddresses) == 0 {
+		fmt.Println("⚠️ 未找到任何tokenContractAddress，跳过价格获取")
+		return
+	}
+
+	fmt.Printf("📊 找到 %d 个token需要获取价格\n", len(tokenAddresses))
+
+	// 并发获取所有token的价格
+	var wg sync.WaitGroup
+	for poolAddress, tokenAddress := range tokenAddresses {
+		wg.Add(1)
+		go func(pool, token string) {
+			defer wg.Done()
+			fetchPriceForToken(pool, token)
+		}(poolAddress, tokenAddress)
+	}
+
+	// 等待所有价格获取完成
+	wg.Wait()
+	fmt.Printf("✅ 本轮价格获取完成 - %s\n", time.Now().Format("15:04:05"))
 }
 
 // 删除重试逻辑：不再保留 readFileWithRetry 和 runCmdWithRetry
