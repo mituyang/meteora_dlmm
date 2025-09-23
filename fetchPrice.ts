@@ -13,6 +13,21 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
+// 价格监控状态管理
+interface PriceMonitorState {
+  isMonitoring: boolean;
+  startTime: number;
+  lastCheckTime: number;
+  initialThreshold: number; // c * 0.4
+  targetThreshold: number;  // c * 0.4 * 1.2
+  poolAddress: string;
+  positionAddress: string;
+  c: number;
+}
+
+// 全局监控状态存储
+const priceMonitorStates = new Map<string, PriceMonitorState>();
+
 // 加载环境变量
 dotenv.config();
 
@@ -112,9 +127,9 @@ async function readPoolDataFromJSON(poolAddress: string): Promise<{c: number, po
 /**
  * 执行移除流动性操作
  */
-async function executeRemoveLiquidity(poolAddress: string, positionAddress: string): Promise<void> {
+async function executeRemoveLiquidity(poolAddress: string, positionAddress: string, reason: string): Promise<void> {
   try {
-    console.log(`🚨 价格低于阈值，开始移除流动性...`);
+    console.log(`🚨 ${reason}，开始移除流动性...`);
     console.log(`池地址: ${poolAddress}`);
     console.log(`仓位地址: ${positionAddress}`);
     
@@ -133,9 +148,89 @@ async function executeRemoveLiquidity(poolAddress: string, positionAddress: stri
     }
     
     console.log('✅ 移除流动性操作完成');
+    
+    // 移除流动性后，清除监控状态
+    priceMonitorStates.delete(poolAddress);
+    console.log(`🧹 已清除池 ${poolAddress} 的监控状态`);
   } catch (error) {
     console.error('❌ 移除流动性操作失败:', error);
   }
+}
+
+/**
+ * 开始价格监控
+ */
+function startPriceMonitoring(poolAddress: string, positionAddress: string, c: number): void {
+  const now = Date.now();
+  const initialThreshold = c * 0.4;
+  const targetThreshold = c * 0.4 * 1.2;
+  
+  const monitorState: PriceMonitorState = {
+    isMonitoring: true,
+    startTime: now,
+    lastCheckTime: now,
+    initialThreshold,
+    targetThreshold,
+    poolAddress,
+    positionAddress,
+    c
+  };
+  
+  priceMonitorStates.set(poolAddress, monitorState);
+  
+  console.log(`🔍 开始监控池 ${poolAddress} 的价格变化`);
+  console.log(`   初始阈值 (c * 0.4): ${initialThreshold}`);
+  console.log(`   目标阈值 (c * 0.4 * 1.2): ${targetThreshold}`);
+  console.log(`   监控开始时间: ${new Date(now).toLocaleString()}`);
+}
+
+/**
+ * 检查价格监控状态
+ */
+async function checkPriceMonitoring(poolAddress: string, currentPrice: number): Promise<boolean> {
+  const monitorState = priceMonitorStates.get(poolAddress);
+  if (!monitorState || !monitorState.isMonitoring) {
+    return false;
+  }
+  
+  const now = Date.now();
+  const elapsedMinutes = (now - monitorState.startTime) / (1000 * 60);
+  
+  console.log(`📊 监控检查 - 池: ${poolAddress}`);
+  console.log(`   当前价格: ${currentPrice}`);
+  console.log(`   目标阈值: ${monitorState.targetThreshold}`);
+  console.log(`   已监控时长: ${elapsedMinutes.toFixed(1)} 分钟`);
+  
+  // 检查是否达到目标阈值
+  if (currentPrice >= monitorState.targetThreshold) {
+    console.log(`✅ 价格已回升至目标阈值，执行移除流动性`);
+    await executeRemoveLiquidity(poolAddress, monitorState.positionAddress, '价格回升至目标阈值');
+    return true;
+  }
+  
+  // 检查是否超过10分钟
+  if (elapsedMinutes >= 10) {
+    console.log(`⏰ 监控已超过10分钟，强制执行移除流动性`);
+    await executeRemoveLiquidity(poolAddress, monitorState.positionAddress, '监控超时');
+    return true;
+  }
+  
+  // 更新最后检查时间
+  monitorState.lastCheckTime = now;
+  priceMonitorStates.set(poolAddress, monitorState);
+  
+  console.log(`⏳ 继续监控，下次检查将在1分钟后`);
+  return false;
+}
+
+/**
+ * 获取所有正在监控的池地址
+ */
+function getMonitoringPoolAddresses(): string[] {
+  return Array.from(priceMonitorStates.keys()).filter(poolAddress => {
+    const state = priceMonitorStates.get(poolAddress);
+    return state && state.isMonitoring;
+  });
 }
 
 /**
@@ -227,18 +322,29 @@ async function main() {
       const poolData = await readPoolDataFromJSON(poolAddress);
       if (poolData) {
         const currentPrice = parseFloat(latestPrice);
-        const threshold = poolData.c * 0.4;
+        const initialThreshold = poolData.c * 0.4;
+        const targetThreshold = poolData.c * 0.4 * 1.2;
         
         console.log(`📊 价格比较:`);
         console.log(`  当前价格: ${currentPrice}`);
-        console.log(`  阈值 (c * 0.4): ${threshold}`);
+        console.log(`  初始阈值 (c * 0.4): ${initialThreshold}`);
+        console.log(`  目标阈值 (c * 0.4 * 1.2): ${targetThreshold}`);
         console.log(`  c 值: ${poolData.c}`);
         
-        if (currentPrice < threshold) {
-          console.log(`⚠️  当前价格 ${currentPrice} 低于阈值 ${threshold}，触发移除流动性操作`);
-          await executeRemoveLiquidity(poolAddress, poolData.positionAddress);
+        // 检查是否已经在监控中
+        const isMonitoring = priceMonitorStates.has(poolAddress) && 
+                           priceMonitorStates.get(poolAddress)!.isMonitoring;
+        
+        if (isMonitoring) {
+          // 如果已经在监控中，检查监控状态
+          console.log(`🔍 池 ${poolAddress} 正在监控中，检查价格变化...`);
+          await checkPriceMonitoring(poolAddress, currentPrice);
+        } else if (currentPrice < initialThreshold) {
+          // 如果价格低于初始阈值且未在监控，开始监控
+          console.log(`⚠️  当前价格 ${currentPrice} 低于初始阈值 ${initialThreshold}，开始价格监控`);
+          startPriceMonitoring(poolAddress, poolData.positionAddress, poolData.c);
         } else {
-          console.log(`✅ 当前价格 ${currentPrice} 高于阈值 ${threshold}，无需操作`);
+          console.log(`✅ 当前价格 ${currentPrice} 高于初始阈值 ${initialThreshold}，无需操作`);
         }
       } else {
         console.log('⚠️  无法读取池数据，跳过价格比较');
@@ -252,6 +358,9 @@ async function main() {
     process.exit(1);
   }
 }
+
+// 导出函数供其他模块使用
+export { getMonitoringPoolAddresses, checkPriceMonitoring };
 
 // 如果直接运行此文件，则执行main函数
 if (require.main === module) {
