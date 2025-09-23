@@ -13,6 +13,49 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
+// ===== 价格缓存（跨进程、基于文件）=====
+const PRICE_CACHE_DIR = '/Users/yqw/meteora_dlmm/data/prices';
+
+interface PriceCacheEntry {
+  price: string;           // 原样字符串
+  timestamp: number;       // ms since epoch
+}
+
+function ensurePriceCacheDir() {
+  try {
+    if (!fs.existsSync(PRICE_CACHE_DIR)) {
+      fs.mkdirSync(PRICE_CACHE_DIR, { recursive: true });
+    }
+  } catch (_) {}
+}
+
+function getPriceCachePath(tokenContractAddress: string): string {
+  return path.join(PRICE_CACHE_DIR, `${tokenContractAddress}.json`);
+}
+
+function readCachedPrice(tokenContractAddress: string): PriceCacheEntry | null {
+  try {
+    ensurePriceCacheDir();
+    const p = getPriceCachePath(tokenContractAddress);
+    if (!fs.existsSync(p)) return null;
+    const raw = fs.readFileSync(p, 'utf8');
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj.price !== 'string' || typeof obj.timestamp !== 'number') return null;
+    return { price: obj.price, timestamp: obj.timestamp };
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCachedPrice(tokenContractAddress: string, price: string): void {
+  try {
+    ensurePriceCacheDir();
+    const p = getPriceCachePath(tokenContractAddress);
+    const entry: PriceCacheEntry = { price, timestamp: Date.now() };
+    fs.writeFileSync(p, JSON.stringify(entry));
+  } catch (_) {}
+}
+
 // 价格监控状态管理
 interface PriceMonitorState {
   isMonitoring: boolean;
@@ -239,6 +282,18 @@ function getMonitoringPoolAddresses(): string[] {
  * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
  */
 async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
+  // 先尝试读取同一分钟内的缓存
+  const cached = readCachedPrice(tokenContractAddress);
+  if (cached) {
+    const now = Date.now();
+    // 同一分钟：取整到分钟比较（01秒由 main.go 调度）
+    const sameMinute = Math.floor(now / 60000) === Math.floor(cached.timestamp / 60000);
+    if (sameMinute) {
+      console.log('🗄️ 使用缓存价格(同一分钟):', cached.price);
+      return cached.price;
+    }
+  }
+
   const apiKey = process.env.OKX_API_KEY;
   const secretKey = process.env.OKX_SECRET_KEY;
   const passphrase = process.env.OKX_PASSPHRASE;
@@ -288,7 +343,10 @@ async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string
     console.log('OKX 响应中未找到价格字段，原始响应:', JSON.stringify(resp.data));
     return undefined;
   }
-  return String(entry.price);
+  const priceStr = String(entry.price);
+  // 成功获取后写入缓存
+  writeCachedPrice(tokenContractAddress, priceStr);
+  return priceStr;
 }
 
 /**
