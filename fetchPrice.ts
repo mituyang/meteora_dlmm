@@ -3,6 +3,7 @@ import {
   PublicKey, 
   clusterApiUrl
 } from '@solana/web3.js';
+import DLMM from '@meteora-ag/dlmm';
 import * as dotenv from 'dotenv';
 import * as CryptoJS from 'crypto-js';
 import axios from 'axios';
@@ -70,6 +71,75 @@ interface PriceMonitorState {
 
 // 全局监控状态存储
 const priceMonitorStates = new Map<string, PriceMonitorState>();
+
+// ===== 仓位X为0的连续监控（每池）=====
+interface ZeroXMonitorState {
+  zeroSince: number | null;   // 开始为0的时间戳(ms)
+}
+const zeroXStates = new Map<string, ZeroXMonitorState>();
+
+function getZeroXState(poolAddress: string): ZeroXMonitorState {
+  let st = zeroXStates.get(poolAddress);
+  if (!st) {
+    st = { zeroSince: null };
+    zeroXStates.set(poolAddress, st);
+  }
+  return st;
+}
+
+function clearZeroXState(poolAddress: string): void {
+  zeroXStates.delete(poolAddress);
+}
+
+async function getPositionTotalXAmount(poolAddress: string, positionAddress: string): Promise<bigint | null> {
+  try {
+    console.log(`🔎 准备读取仓位X数量: pool=${poolAddress}, position=${positionAddress}`);
+    const poolPubKey = new PublicKey(poolAddress);
+    const positionPubKey = new PublicKey(positionAddress);
+    const dlmmPool = await DLMM.create(connection, poolPubKey);
+    const position = await dlmmPool.getPosition(positionPubKey);
+    // position.positionData.totalXAmount 可能是 BN-like，转为字符串再到 BigInt
+    const raw: any = position.positionData.totalXAmount;
+    const v = typeof raw === 'string' ? BigInt(raw) : BigInt(raw.toString());
+    console.log(`📦 当前仓位X数量(最小单位): ${v.toString()}`);
+    return v;
+  } catch (e) {
+    console.error('❌ 获取仓位X数量失败:', e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+async function checkZeroXAndMaybeRemove(poolAddress: string, positionAddress: string): Promise<void> {
+  const amount = await getPositionTotalXAmount(poolAddress, positionAddress);
+  if (amount === null) {
+    console.log('⚠️ 本次未能获取到仓位X数量，跳过连续为0检查');
+    return;
+  }
+
+  const st = getZeroXState(poolAddress);
+  const now = Date.now();
+
+  if (amount === 0n) {
+    if (st.zeroSince === null) {
+      st.zeroSince = now;
+      console.log(`🧪 发现X为0，开始计时: pool=${poolAddress}，连续第1分钟`);
+    } else {
+      const mins = (now - st.zeroSince) / (1000 * 60);
+      const consecutive = Math.floor(mins) + 1; // 连续第N分钟（首分钟记为1）
+      console.log(`🧪 X为0，连续第${consecutive}分钟`);
+      if (mins >= 30) {
+        console.log('⛔ X为0已持续30分钟，执行移除流动性');
+        await executeRemoveLiquidity(poolAddress, positionAddress, 'X为0持续30分钟');
+        clearZeroXState(poolAddress);
+      }
+    }
+  } else {
+    if (st.zeroSince !== null) {
+      console.log('✅ X不为0，清除计时');
+    }
+    clearZeroXState(poolAddress);
+  }
+}
 
 // 加载环境变量
 dotenv.config();
@@ -404,6 +474,9 @@ async function main() {
         } else {
           console.log(`✅ 当前价格 ${currentPrice} 高于初始阈值 ${initialThreshold}，无需操作`);
         }
+
+        // 无论是否监控价格，都检查仓位X是否连续为0
+        await checkZeroXAndMaybeRemove(poolAddress, poolData.positionAddress);
       } else {
         console.log('⚠️  无法读取池数据，跳过价格比较');
       }

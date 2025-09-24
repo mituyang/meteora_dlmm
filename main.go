@@ -27,7 +27,59 @@ type ProfitData struct {
 
 var csvHeaders []string
 var processedFiles sync.Map
-var scheduledRewards sync.Map
+
+// 日志系统
+var logFile *os.File
+var logMutex sync.Mutex
+
+// 初始化日志系统
+func initLogging() error {
+	dataDir := "/Users/yqw/meteora_dlmm/data/log"
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("创建data目录失败: %v", err)
+	}
+
+	// 创建带时间戳的日志文件
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	logPath := filepath.Join(dataDir, fmt.Sprintf("app_%s.log", timestamp))
+
+	var err error
+	logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("创建日志文件失败: %v", err)
+	}
+
+	fmt.Printf("📝 日志文件已创建: %s\n", logPath)
+	return nil
+}
+
+// 写入日志（同时输出到终端和文件）
+func logOutput(format string, args ...interface{}) {
+	message := fmt.Sprintf(format, args...)
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logMessage := fmt.Sprintf("[%s] %s", timestamp, message)
+
+	// 输出到终端
+	fmt.Print(message)
+
+	// 写入日志文件
+	logMutex.Lock()
+	if logFile != nil {
+		logFile.WriteString(logMessage)
+		logFile.Sync()
+	}
+	logMutex.Unlock()
+}
+
+// 关闭日志系统
+func closeLogging() {
+	logMutex.Lock()
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
+	logMutex.Unlock()
+}
 
 // 全局上下文和取消函数，用于优雅关闭
 var (
@@ -37,6 +89,12 @@ var (
 )
 
 func main() {
+	// 初始化日志系统
+	if err := initLogging(); err != nil {
+		log.Fatalf("初始化日志系统失败: %v", err)
+	}
+	defer closeLogging()
+
 	// 创建可取消的上下文
 	globalCtx, globalCancel = context.WithCancel(context.Background())
 	defer globalCancel()
@@ -48,7 +106,7 @@ func main() {
 	// 启动信号处理goroutine
 	go func() {
 		sig := <-sigChan
-		fmt.Printf("\n🛑 收到信号 %v，开始优雅关闭...\n", sig)
+		logOutput("\n🛑 收到信号 %v，开始优雅关闭...\n", sig)
 		globalCancel()
 	}()
 
@@ -71,16 +129,23 @@ func main() {
 		log.Fatalf("获取文件行数失败: %v", err)
 	}
 
-	fmt.Printf("开始监听文件: %s\n", csvPath)
-	fmt.Printf("开始监听目录: %s\n", dataDir)
-	fmt.Printf("CSV字段数: %d\n", len(csvHeaders))
-	fmt.Printf("当前行数: %d\n", currentLineCount)
+	logOutput("开始监听文件: %s\n", csvPath)
+	logOutput("开始监听目录: %s\n", dataDir)
+	logOutput("CSV字段数: %d\n", len(csvHeaders))
+	logOutput("当前行数: %d\n", currentLineCount)
 
 	// 启动价格获取定时任务
 	shutdownWg.Add(1)
 	go func() {
 		defer shutdownWg.Done()
 		startPriceFetcherTicker()
+	}()
+
+	// 启动全局领取奖励定时任务
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		startGlobalClaimRewardsTicker()
 	}()
 
 	// 创建文件监听器
@@ -110,11 +175,11 @@ func main() {
 	for {
 		select {
 		case <-globalCtx.Done():
-			fmt.Println("🛑 收到关闭信号，停止文件监听...")
+			logOutput("🛑 收到关闭信号，停止文件监听...\n")
 			watcher.Close()
-			fmt.Println("⏳ 等待所有goroutine完成...")
+			logOutput("⏳ 等待所有goroutine完成...\n")
 			shutdownWg.Wait()
-			fmt.Println("✅ 程序已优雅关闭")
+			logOutput("✅ 程序已优雅关闭\n")
 			return
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -131,10 +196,10 @@ func main() {
 				}
 
 				if newLineCount > currentLineCount {
-					fmt.Printf("🔄 检测到 %d 行新增，开始处理...\n", newLineCount-currentLineCount)
+					logOutput("🔄 检测到 %d 行新增，开始处理...\n", newLineCount-currentLineCount)
 					processNewLines(csvPath, dataDir, currentLineCount)
 					currentLineCount = newLineCount
-					fmt.Printf("📊 当前总行数: %d\n", currentLineCount)
+					logOutput("📊 当前总行数: %d\n", currentLineCount)
 				}
 			}
 
@@ -143,7 +208,7 @@ func main() {
 				if event.Op&fsnotify.Create == fsnotify.Create {
 					// 去重：只处理一次
 					if _, loaded := processedFiles.LoadOrStore(event.Name, true); !loaded {
-						fmt.Printf("🆕 检测到JSON文件事件: %s, 操作: %v\n", event.Name, event.Op)
+						logOutput("🆕 检测到JSON文件事件: %s, 操作: %v\n", event.Name, event.Op)
 						time.Sleep(100 * time.Millisecond) // 等待文件写入完成
 						// 占用并发令牌
 						sem <- struct{}{}
@@ -265,7 +330,7 @@ func processNewLines(csvPath, dataDir string, lastLineCount int) {
 			continue
 		}
 
-		fmt.Printf("✅ 新增行已保存: %s -> %s\n", profitData.PoolAddress, jsonFilePath)
+		logOutput("✅ 新增行已保存: %s -> %s\n", profitData.PoolAddress, jsonFilePath)
 		lineNum++
 	}
 }
@@ -357,13 +422,13 @@ func processNewJSONFile(jsonFilePath string) {
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
 
 	// 执行命令
-	fmt.Printf("🚀 执行命令: %s\n", strings.Join(cmd.Args, " "))
+	logOutput("🚀 执行命令: %s\n", strings.Join(cmd.Args, " "))
 
 	// 执行命令并捕获输出（单次执行）
 	output, err := cmd.CombinedOutput()
 
 	// 实时显示输出
-	fmt.Print(string(output))
+	logOutput("%s", string(output))
 
 	// 检查是否有错误
 	if err != nil {
@@ -371,50 +436,108 @@ func processNewJSONFile(jsonFilePath string) {
 		return
 	}
 
-	fmt.Printf("✅ addLiquidity.ts执行成功\n")
+	logOutput("✅ addLiquidity.ts执行成功\n")
 
-	// 使用池地址作为唯一键；仓位地址在执行时从 JSON 读取
-	key := poolAddress
-	if _, loaded := scheduledRewards.LoadOrStore(key, true); loaded {
-		fmt.Printf("⏱️ 已存在定时任务: %s\n", key)
-		return
-	}
-	fmt.Printf("⏱️ 启动领取奖励定时任务(每1分钟): pool=%s\n", poolAddress)
-	shutdownWg.Add(1)
-	go func() {
-		defer shutdownWg.Done()
-		startClaimRewardsTicker(poolAddress)
-	}()
+	// 不再为单个池启动定时任务，改为全局定时任务处理所有池
+	// 这里只记录日志，实际领取由全局定时任务处理
+	logOutput("✅ 新增池已处理: %s，将由全局定时任务处理领取奖励\n", poolAddress)
 }
 
-// startClaimRewardsTicker 每分钟执行一次 claimAllRewards.ts
-func startClaimRewardsTicker(poolAddress string) {
-	key := poolAddress
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+// startGlobalClaimRewardsTicker 全局领取奖励定时任务，扫描data目录下所有JSON文件
+func startGlobalClaimRewardsTicker() {
+	logOutput("🕐 启动全局领取奖励定时任务（每分钟02秒和32秒）\n")
 
-	// 立即执行一次；若获取不到 positionAddress，则停止任务并移除标记
-	if ok := runClaimRewards(poolAddress); !ok {
-		log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
-		scheduledRewards.Delete(key)
-		return
+	// 计算到下一个02秒的时间
+	now := time.Now()
+	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
+	nextTarget02 := nextMinute.Add(2 * time.Second)  // 02秒
+	nextTarget32 := nextMinute.Add(32 * time.Second) // 32秒
+
+	// 如果当前时间已经过了这分钟的02秒，则等到下一分钟的02秒
+	if now.After(nextTarget02) {
+		nextTarget02 = nextTarget02.Add(time.Minute)
+	}
+	// 如果当前时间已经过了这分钟的32秒，则等到下一分钟的32秒
+	if now.After(nextTarget32) {
+		nextTarget32 = nextTarget32.Add(time.Minute)
 	}
 
-	// 每分钟执行；若过程中读取不到 positionAddress，则停止任务并移除标记
+	// 选择最近的时间点
+	var nextTarget time.Time
+	if nextTarget02.Before(nextTarget32) {
+		nextTarget = nextTarget02
+	} else {
+		nextTarget = nextTarget32
+	}
+
+	initialDelay := nextTarget.Sub(now)
+	logOutput("⏰ 距离下次领取奖励还有: %v\n", initialDelay.Round(time.Second))
+
+	// 等待到下一个时间点，但可以被取消
+	select {
+	case <-globalCtx.Done():
+		logOutput("🛑 收到关闭信号，停止全局领取奖励定时任务\n")
+		return
+	case <-time.After(initialDelay):
+		// 继续执行
+	}
+
+	// 立即执行一次
+	executeGlobalClaimRewards()
+
+	// 然后每分钟的02秒和32秒执行
+	ticker := time.NewTicker(1 * time.Second) // 每秒检查一次
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-globalCtx.Done():
-			log.Printf("🛑 收到关闭信号，停止领取奖励定时任务: pool=%s", poolAddress)
-			scheduledRewards.Delete(key)
+			logOutput("🛑 收到关闭信号，停止全局领取奖励定时任务\n")
 			return
 		case <-ticker.C:
-			if ok := runClaimRewards(poolAddress); !ok {
-				log.Printf("未读取到 positionAddress，停止定时领取: pool=%s", poolAddress)
-				scheduledRewards.Delete(key)
-				return
+			now := time.Now()
+			second := now.Second()
+			// 在02秒和32秒时执行
+			if second == 2 || second == 32 {
+				executeGlobalClaimRewards()
 			}
 		}
 	}
+}
+
+// executeGlobalClaimRewards 执行全局领取奖励
+func executeGlobalClaimRewards() {
+	logOutput("🔄 开始全局领取奖励 - %s\n", time.Now().Format("15:04:05"))
+
+	// 获取data目录下所有JSON文件
+	dataDir := "/Users/yqw/meteora_dlmm/data"
+	files, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Printf("读取data目录失败: %v", err)
+		return
+	}
+
+	poolCount := 0
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		// 提取poolAddress（去掉.json后缀）
+		poolAddress := strings.TrimSuffix(file.Name(), ".json")
+
+		// 检查是否有positionAddress
+		positionAddress := readPositionFromPoolJSON(poolAddress)
+		if positionAddress == "" {
+			continue
+		}
+
+		poolCount++
+		logOutput("🔄 正在领取奖励: %s\n", poolAddress)
+		runClaimRewards(poolAddress)
+	}
+
+	logOutput("✅ 本轮全局领取奖励完成，处理了 %d 个池 - %s\n", poolCount, time.Now().Format("15:04:05"))
 }
 
 // runClaimRewards 执行领取奖励脚本
@@ -454,10 +577,10 @@ func runClaimRewards(poolAddress string) bool {
 		fmt.Sprintf("--pool=%s", poolAddress),
 	)
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
-	fmt.Printf("▶️  执行领取奖励: %s (position 来自 JSON)\n", strings.Join(cmd.Args, " "))
+	logOutput("▶️  执行领取奖励: %s (position 来自 JSON)\n", strings.Join(cmd.Args, " "))
 	// 执行命令（单次执行）
 	out, err := cmd.CombinedOutput()
-	fmt.Print(string(out))
+	logOutput("%s", string(out))
 	if err != nil {
 		log.Printf("领取奖励执行失败: %v", err)
 	}
@@ -558,6 +681,9 @@ func fetchPriceForToken(poolAddress, tokenContractAddress string) {
 	output, err := cmd.CombinedOutput()
 	outputStr := string(output)
 
+	// 实时显示所有输出到终端和日志文件
+	logOutput("%s", outputStr)
+
 	// 解析输出，提取价格信息
 	var finalPrice string
 	lines := strings.Split(outputStr, "\n")
@@ -579,10 +705,10 @@ func fetchPriceForToken(poolAddress, tokenContractAddress string) {
 
 	// 输出价格信息
 	if finalPrice != "" {
-		fmt.Printf("💰 最终价格: %s\n", finalPrice)
-		fmt.Printf("✅ 价格获取成功 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
+		logOutput("💰 最终价格: %s\n", finalPrice)
+		logOutput("✅ 价格获取成功 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
 	} else {
-		fmt.Printf("❌ 价格获取失败 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
+		logOutput("❌ 价格获取失败 [ca: %s, poolName: %s]\n", tokenContractAddress, poolName)
 		if err != nil {
 			log.Printf("错误详情: %v", err)
 		}
@@ -591,7 +717,7 @@ func fetchPriceForToken(poolAddress, tokenContractAddress string) {
 
 // 启动价格获取定时任务
 func startPriceFetcherTicker() {
-	fmt.Println("🕐 启动价格获取定时任务（每分钟01秒）")
+	logOutput("🕐 启动价格获取定时任务（每分钟01秒）\n")
 
 	// 计算到下一个01秒的时间
 	now := time.Now()
@@ -604,12 +730,12 @@ func startPriceFetcherTicker() {
 	}
 
 	initialDelay := nextTarget.Sub(now)
-	fmt.Printf("⏰ 距离下次价格获取还有: %v\n", initialDelay.Round(time.Second))
+	logOutput("⏰ 距离下次价格获取还有: %v\n", initialDelay.Round(time.Second))
 
 	// 等待到下一个01秒，但可以被取消
 	select {
 	case <-globalCtx.Done():
-		fmt.Println("🛑 收到关闭信号，停止价格获取定时任务")
+		logOutput("🛑 收到关闭信号，停止价格获取定时任务\n")
 		return
 	case <-time.After(initialDelay):
 		// 继续执行
@@ -625,7 +751,7 @@ func startPriceFetcherTicker() {
 	for {
 		select {
 		case <-globalCtx.Done():
-			fmt.Println("🛑 收到关闭信号，停止价格获取定时任务")
+			logOutput("🛑 收到关闭信号，停止价格获取定时任务\n")
 			return
 		case <-ticker.C:
 			executePriceFetch()
@@ -635,26 +761,26 @@ func startPriceFetcherTicker() {
 
 // 执行价格获取
 func executePriceFetch() {
-	fmt.Printf("🔄 开始价格获取 - %s\n", time.Now().Format("15:04:05"))
+	logOutput("🔄 开始价格获取 - %s\n", time.Now().Format("15:04:05"))
 
 	tokenAddresses := getAllTokenContractAddresses()
 	if len(tokenAddresses) == 0 {
-		fmt.Println("⚠️ 未找到任何tokenContractAddress，跳过价格获取")
+		logOutput("⚠️ 未找到任何tokenContractAddress，跳过价格获取\n")
 		return
 	}
 
-	fmt.Printf("📊 找到 %d 个token需要获取价格\n", len(tokenAddresses))
+	logOutput("📊 找到 %d 个token需要获取价格\n", len(tokenAddresses))
 
 	// 顺序获取所有token的价格（避免OKX API限制）
 	for poolAddress, tokenAddress := range tokenAddresses {
-		fmt.Printf("🔄 正在获取价格: %s -> %s\n", poolAddress, tokenAddress)
+		logOutput("🔄 正在获取价格: %s -> %s\n", poolAddress, tokenAddress)
 		fetchPriceForToken(poolAddress, tokenAddress)
 
 		// 添加延迟避免API限制
 		time.Sleep(1100 * time.Millisecond)
 	}
 
-	fmt.Printf("✅ 本轮价格获取完成 - %s\n", time.Now().Format("15:04:05"))
+	logOutput("✅ 本轮价格获取完成 - %s\n", time.Now().Format("15:04:05"))
 }
 
 // 删除重试逻辑：不再保留 readFileWithRetry 和 runCmdWithRetry

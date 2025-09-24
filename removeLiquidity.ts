@@ -136,7 +136,7 @@ async function executeJupSwap(ca: string): Promise<boolean> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxFee 500000`;
+    const command = `./jupSwap -input ${ca} -maxfee 500000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {

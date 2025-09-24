@@ -20,6 +20,73 @@ const execAsync = promisify(exec);
 dotenv.config();
 
 /**
+ * 智能等待代币到账并执行 jupSwap
+ * @param ca token合约地址
+ */
+async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
+  const maxWaitTime = 30000; // 最多等待30秒
+  const checkInterval = 1500; // 每1.5秒检查一次
+  const startTime = Date.now();
+  
+  console.log(`🔍 开始检查代币余额: ${ca}`);
+  
+  while (Date.now() - startTime < maxWaitTime) {
+    try {
+      // 检查代币余额
+      const balance = await checkTokenBalance(ca);
+      if (balance > 0) {
+        console.log(`✅ 检测到代币余额: ${balance}，立即执行 jupSwap`);
+        await executeJupSwap(ca);
+        return;
+      }
+      
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      console.log(`⏳ 代币余额为0，已等待 ${elapsed} 秒，继续检查...`);
+      
+      // 等待下次检查
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      
+    } catch (error) {
+      console.error('❌ 检查代币余额失败:', error instanceof Error ? error.message : String(error));
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+  }
+  
+  console.log(`⏰ 等待超时(30秒)，强制执行 jupSwap`);
+  await executeJupSwap(ca);
+}
+
+/**
+ * 检查代币余额
+ * @param tokenMint 代币合约地址
+ * @returns 代币余额(最小单位)
+ */
+async function checkTokenBalance(tokenMint: string): Promise<number> {
+  try {
+    const userWallet = new PublicKey(process.env.USER_WALLET_ADDRESS!);
+    const mintPubKey = new PublicKey(tokenMint);
+    
+    // 获取代币账户
+    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(userWallet, {
+      mint: mintPubKey
+    });
+    
+    if (tokenAccounts.value.length === 0) {
+      return 0; // 没有代币账户
+    }
+    
+    // 获取第一个代币账户的余额
+    const tokenAccount = tokenAccounts.value[0];
+    const balance = tokenAccount.account.data.parsed.info.tokenAmount.uiAmount;
+    
+    return balance || 0;
+  } catch (error) {
+    console.error('检查代币余额失败:', error);
+    return 0;
+  }
+}
+
+/**
  * 执行 jupSwap 命令
  * @param ca token合约地址
  */
@@ -27,7 +94,7 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxFee 50000`;
+    const command = `./jupSwap -input ${ca} -maxfee 50000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
@@ -310,11 +377,11 @@ async function claimAllRewardsByPosition() {
 
     console.log('✅ 领取完成');
     
-    // 领取成功后执行 jupSwap
+    // 领取成功后智能等待代币到账，然后执行 jupSwap
     const ca = readTokenContractAddressFromPoolJson(poolAddress.toString());
     if (ca) {
-      console.log(`🔄 领取成功，开始执行 jupSwap: ${ca}`);
-      await executeJupSwap(ca);
+      console.log(`⏳ 领取成功，等待代币到账后执行 jupSwap: ${ca}`);
+      await waitForTokenAndExecuteJupSwap(ca);
     } else {
       console.log('⚠️ 未找到 token 合约地址，跳过 jupSwap');
     }
