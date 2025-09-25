@@ -255,6 +255,15 @@ function getPositionFromArgs(): string | null {
   return null;
 }
 
+// 从命令行参数中获取是否跳过swap
+function getSkipSwapFromArgs(): boolean {
+  for (const arg of argv) {
+    if (arg === '--skipSwap' || arg === '--skipSwap=true') return true;
+    if (arg === '--skipSwap=false') return false;
+  }
+  return false;
+}
+
 /**
  * 解密私钥
  * @param encryptedPrivateKey 加密的私钥
@@ -392,6 +401,13 @@ async function removeLiquidity() {
     
     console.log('✅ 移除流动性完成');
     
+    // 可通过 --skipSwap 控制是否在移除后立即执行 jupSwap（默认执行）
+    const skipSwap = getSkipSwapFromArgs();
+    if (skipSwap) {
+      console.log('⏭️ 检测到 --skipSwap，跳过移除后的 jupSwap');
+      return;
+    }
+
     // 移除流动性成功后执行 jupSwap
     const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
     if (ca) {

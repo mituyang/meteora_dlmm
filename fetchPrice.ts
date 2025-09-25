@@ -351,7 +351,7 @@ function getMonitoringPoolAddresses(): string[] {
  * POST /api/v5/dex/market/price
  * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
  */
-async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
+export async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
   // 先尝试读取同一分钟内的缓存
   const cached = readCachedPrice(tokenContractAddress);
   if (cached) {

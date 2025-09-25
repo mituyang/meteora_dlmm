@@ -106,8 +106,13 @@ func main() {
 	// 启动信号处理goroutine
 	go func() {
 		sig := <-sigChan
-		logOutput("\n🛑 收到信号 %v，开始优雅关闭...\n", sig)
+		logOutput("\n🛑 收到信号 %v，强制终止程序...\n", sig)
 		globalCancel()
+
+		// 如果收到第二个信号，立即退出
+		sig2 := <-sigChan
+		logOutput("\n💀 收到第二个信号 %v，立即退出！\n", sig2)
+		os.Exit(1)
 	}()
 
 	csvPath := "/Users/yqw/dlmm_8_27/data/auto_profit.csv"
@@ -146,6 +151,13 @@ func main() {
 	go func() {
 		defer shutdownWg.Done()
 		startGlobalClaimRewardsTicker()
+	}()
+
+	// 启动jupSwap定时任务
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		startJupSwapTicker()
 	}()
 
 	// 创建文件监听器
@@ -781,6 +793,253 @@ func executePriceFetch() {
 	}
 
 	logOutput("✅ 本轮价格获取完成 - %s\n", time.Now().Format("15:04:05"))
+}
+
+// 启动jupSwap定时任务
+func startJupSwapTicker() {
+	logOutput("🕐 启动jupSwap定时任务（每分钟06秒）\n")
+
+	// 计算到下一个06秒的时间
+	now := time.Now()
+	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
+	nextTarget := nextMinute.Add(6 * time.Second) // 06秒
+
+	// 如果当前时间已经过了这分钟的06秒，则等到下一分钟的06秒
+	if now.After(nextTarget) {
+		nextTarget = nextTarget.Add(time.Minute)
+	}
+
+	initialDelay := nextTarget.Sub(now)
+	logOutput("⏰ 距离下次jupSwap还有: %v\n", initialDelay.Round(time.Second))
+
+	// 等待到下一个06秒，但可以被取消
+	select {
+	case <-globalCtx.Done():
+		logOutput("🛑 收到关闭信号，停止jupSwap定时任务\n")
+		return
+	case <-time.After(initialDelay):
+		// 继续执行
+	}
+
+	// 立即执行一次
+	executeJupSwap()
+
+	// 然后每分钟的06秒执行
+	ticker := time.NewTicker(1 * time.Second) // 每秒检查一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-globalCtx.Done():
+			logOutput("🛑 收到关闭信号，停止jupSwap定时任务\n")
+			return
+		case <-ticker.C:
+			now := time.Now()
+			second := now.Second()
+			// 在06秒时执行
+			if second == 6 {
+				executeJupSwap()
+			}
+		}
+	}
+}
+
+// 执行jupSwap
+func executeJupSwap() {
+	// 检查全局上下文是否已取消
+	select {
+	case <-globalCtx.Done():
+		logOutput("⏹️ 程序已取消，跳过jupSwap\n")
+		return
+	default:
+	}
+
+	logOutput("🔄 开始jupSwap - %s\n", time.Now().Format("15:04:05"))
+
+	// 先获取持仓信息，解析出所有代币地址
+	tokenAddresses := getTokenBalancesFromJupSwap()
+	if len(tokenAddresses) == 0 {
+		logOutput("⚠️ 未找到任何代币持仓，跳过jupSwap\n")
+		return
+	}
+
+	logOutput("📊 找到 %d 个代币需要执行swap\n", len(tokenAddresses))
+
+	// 顺序执行所有代币的jupSwap（避免并发冲突）
+	for i, tokenAddress := range tokenAddresses {
+		// 检查全局上下文是否已取消
+		select {
+		case <-globalCtx.Done():
+			logOutput("⏹️ 程序已取消，停止执行jupSwap\n")
+			return
+		default:
+		}
+
+		logOutput("🔄 正在执行jupSwap (%d/%d): %s\n", i+1, len(tokenAddresses), tokenAddress)
+		executeJupSwapForToken(tokenAddress)
+
+		// 添加延迟避免系统负载过高，但检查取消状态
+		select {
+		case <-globalCtx.Done():
+			logOutput("⏹️ 程序已取消，停止执行jupSwap\n")
+			return
+		case <-time.After(2 * time.Second):
+			// 继续下一个代币
+		}
+	}
+
+	logOutput("✅ 本轮jupSwap完成 - %s\n", time.Now().Format("15:04:05"))
+}
+
+// 从jupSwap获取代币持仓信息
+func getTokenBalancesFromJupSwap() []string {
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(globalCtx, 30*time.Second)
+	defer cancel()
+
+	// 执行jupSwap命令获取持仓信息（不指定input参数）
+	cmd := exec.CommandContext(ctx, "./jupSwap")
+	cmd.Dir = "/Users/yqw/meteora_dlmm"
+
+	// 执行命令并捕获输出
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+
+	// 实时显示所有输出到终端和日志文件
+	logOutput("%s", outputStr)
+
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			logOutput("❌ 获取持仓信息超时（30秒）\n")
+		} else if ctx.Err() == context.Canceled {
+			logOutput("❌ 获取持仓信息被取消\n")
+		} else {
+			logOutput("❌ 获取持仓信息失败: %v\n", err)
+		}
+		return []string{}
+	}
+
+	// 读取黑名单（每次执行时重新读取，支持动态更新）
+	banList := readBanList()
+
+	// 解析输出，提取代币地址
+	tokenAddresses := parseTokenAddressesFromOutput(outputStr, banList)
+	logOutput("📊 从持仓信息中解析出 %d 个代币地址（已过滤黑名单）\n", len(tokenAddresses))
+
+	return tokenAddresses
+}
+
+// 读取黑名单ca地址
+func readBanList() map[string]bool {
+	banList := make(map[string]bool)
+	banFilePath := "/Users/yqw/meteora_dlmm/data/ban/ban.csv"
+
+	// 检查文件是否存在
+	if _, err := os.Stat(banFilePath); os.IsNotExist(err) {
+		logOutput("⚠️ 黑名单文件不存在: %s\n", banFilePath)
+		return banList
+	}
+
+	// 读取文件内容
+	content, err := os.ReadFile(banFilePath)
+	if err != nil {
+		logOutput("❌ 读取黑名单文件失败: %v\n", err)
+		return banList
+	}
+
+	// 解析逗号分隔的ca地址（支持英文逗号和中文逗号）
+	line := strings.TrimSpace(string(content))
+	if line == "" {
+		logOutput("📝 黑名单文件为空\n")
+		return banList
+	}
+
+	// 先替换中文逗号为英文逗号，然后分割
+	line = strings.ReplaceAll(line, "，", ",")
+	addresses := strings.Split(line, ",")
+	for _, addr := range addresses {
+		addr = strings.TrimSpace(addr)
+		if addr != "" {
+			banList[addr] = true
+			logOutput("🚫 黑名单ca: %s\n", addr)
+		}
+	}
+
+	logOutput("📊 加载了 %d 个黑名单ca\n", len(banList))
+	return banList
+}
+
+// 从jupSwap输出中解析代币地址
+func parseTokenAddressesFromOutput(output string, banList map[string]bool) []string {
+	var tokenAddresses []string
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		// 查找包含"代币:"的行
+		if strings.Contains(line, "代币:") {
+			// 解析格式: "代币: AJ5WbjdWivswCGvyfMgbTjfSegCLHXJtXBTgjRhtsE1k, 余额: 183149994540 (183149.994540)"
+			parts := strings.Split(line, "代币:")
+			if len(parts) >= 2 {
+				// 提取代币地址（去掉逗号前的部分）
+				tokenPart := strings.TrimSpace(parts[1])
+				commaIndex := strings.Index(tokenPart, ",")
+				if commaIndex > 0 {
+					tokenAddress := strings.TrimSpace(tokenPart[:commaIndex])
+					// 验证地址格式（Solana地址通常是44个字符）
+					if len(tokenAddress) >= 32 && len(tokenAddress) <= 44 {
+						// 检查是否在黑名单中
+						if banList[tokenAddress] {
+							logOutput("🚫 跳过黑名单代币: %s\n", tokenAddress)
+						} else {
+							tokenAddresses = append(tokenAddresses, tokenAddress)
+							logOutput("🔍 发现代币: %s\n", tokenAddress)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return tokenAddresses
+}
+
+// 执行单个token的jupSwap
+func executeJupSwapForToken(ca string) {
+	// 检查全局上下文是否已取消
+	select {
+	case <-globalCtx.Done():
+		logOutput("⏹️ 程序已取消，跳过代币: %s\n", ca)
+		return
+	default:
+	}
+
+	// 创建带超时的上下文（每个代币最多30秒）
+	ctx, cancel := context.WithTimeout(globalCtx, 30*time.Second)
+	defer cancel()
+
+	// 执行jupSwap命令
+	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "500000")
+	cmd.Dir = "/Users/yqw/meteora_dlmm"
+
+	// 执行命令并捕获输出
+	output, err := cmd.CombinedOutput()
+	outputStr := string(output)
+
+	// 实时显示所有输出到终端和日志文件
+	logOutput("%s", outputStr)
+
+	// 检查执行结果
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			logOutput("❌ jupSwap执行超时（30秒）[ca: %s]\n", ca)
+		} else if ctx.Err() == context.Canceled {
+			logOutput("❌ jupSwap执行被取消 [ca: %s]\n", ca)
+		} else {
+			logOutput("❌ jupSwap执行失败 [ca: %s]: %v\n", ca, err)
+		}
+	} else {
+		logOutput("✅ jupSwap执行成功 [ca: %s]\n", ca)
+	}
 }
 
 // 删除重试逻辑：不再保留 readFileWithRetry 和 runCmdWithRetry

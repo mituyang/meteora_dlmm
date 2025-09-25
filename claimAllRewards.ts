@@ -6,6 +6,8 @@ import {
   clusterApiUrl
 } from '@solana/web3.js';
 import DLMM from '@meteora-ag/dlmm';
+import axios from 'axios';
+import { fetchOkxLatestPrice as fetchOkxLatestPriceFromModule } from './fetchPrice';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
 import CryptoJS from 'crypto-js';
@@ -116,6 +118,29 @@ async function executeJupSwap(ca: string): Promise<void> {
 
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
+
+function getRawAmount(value: any): number {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') return Number(value);
+  if (value && typeof value.toNumber === 'function') return value.toNumber();
+  try { return Number(value); } catch { return 0; }
+}
+
+// 从本地价格缓存读取 USD 价格：/data/prices/<mint>.json
+function readUsdPriceFromCache(tokenMint: string): number | undefined {
+  try {
+    const p = path.resolve(__dirname, 'data', 'prices', `${tokenMint}.json`);
+    if (!fs.existsSync(p)) return undefined;
+    const raw = fs.readFileSync(p, 'utf8');
+    const obj = JSON.parse(raw);
+    const price = obj?.price;
+    if (price === undefined || price === null) return undefined;
+    const n = Number(price);
+    return Number.isFinite(n) ? n : undefined;
+  } catch (_) {
+    return undefined;
+  }
+}
 
 // 命令行参数解析与清洗（优先级高于环境变量）
 const argv = process.argv.slice(2);
@@ -284,6 +309,62 @@ async function claimAllRewardsByPosition() {
     console.log(`${xTokenName} 代币精度:`, tokenXDecimals);
     console.log('SOL 代币精度:', tokenYDecimals);
 
+    // ===== 止盈对比（提前进行）：累计已领取(USD) + 当前position(USD) 对比 1.05 SOL(USD) =====
+    try {
+      const apiUrl = `https://dlmm-api.meteora.ag/position/${positionPubKey.toString()}`;
+      const resp = await axios.get(apiUrl, { timeout: 10000 });
+      const data = resp?.data;
+      if (data && typeof data.total_fee_usd_claimed === 'number' && typeof data.total_reward_usd_claimed === 'number') {
+        const totalUsd = Number(data.total_fee_usd_claimed) + Number(data.total_reward_usd_claimed);
+        console.log(`💵 累计已领取(USD): fee=${data.total_fee_usd_claimed}, reward=${data.total_reward_usd_claimed}, sum=${totalUsd}`);
+
+        // 读取 position 的当前持仓 X/Y（最小单位），换算为实际数量
+        const currentX = getRawAmount(position.positionData.totalXAmount) / Math.pow(10, tokenXDecimals);
+        const currentY = getRawAmount(position.positionData.totalYAmount) / Math.pow(10, tokenYDecimals);
+
+        // 获取 X 与 SOL 的 USD 价格（只从本地 data/prices 读取最新价格）
+        // X 价格文件名为 ca（token 合约地址），来自 pool JSON；非 mint 地址
+        const caX = readTokenContractAddressFromPoolJson(poolAddress.toString());
+        const solMint = 'So11111111111111111111111111111111111111112';
+        const xUsdPrice = caX ? readUsdPriceFromCache(caX) : undefined;
+        // SOL 价格通过 fetchPrice.ts 的方法实时获取（字符串转 number）
+        const solPriceStr = await fetchOkxLatestPriceFromModule(solMint);
+        const solUsdPrice = solPriceStr ? Number(solPriceStr) : undefined;
+
+        if (xUsdPrice !== undefined && solUsdPrice !== undefined) {
+          const currentPositionUsd = currentX * xUsdPrice + currentY * solUsdPrice;
+          const sumUsd = totalUsd + currentPositionUsd;
+          console.log(`💰 当前position价值(USD): X=${(currentX * xUsdPrice).toFixed(6)}, Y=${(currentY * solUsdPrice).toFixed(6)}, sum=${currentPositionUsd.toFixed(6)}`);
+          console.log(`💰 累计已领取USD + 当前positionUSD: ${(sumUsd).toFixed(6)}`);
+          console.log(`🪙 1 SOL 的USD价格: ${solUsdPrice}`);
+          const threshold = 1.05 * solUsdPrice;
+          if (sumUsd >= threshold) {
+            console.log('✅ (累计领取USD + 当前positionUSD) ≥ 1.05 SOL 的USD，触发移除流动性');
+            // 触发移除流动性，执行内部swap
+            try {
+              const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
+              console.log(`🛠️ 触发移除流动性: ${cmd}`);
+              const { stdout, stderr } = await execAsync(cmd, { cwd: '/Users/yqw/meteora_dlmm' });
+              if (stdout) console.log(stdout);
+              if (stderr) console.error(stderr);
+            } catch (e) {
+              console.error('❌ 触发移除流动性失败:', e);
+            }
+            // 直接返回，避免继续领取
+            return;
+          } else {
+            console.log('❌ (累计领取USD + 当前positionUSD) 未达到 1.05 SOL 的USD，继续流程');
+          }
+        } else {
+          console.log('⚠️ 本地价格缓存缺失(X或SOL)，跳过对比');
+        }
+      } else {
+        console.log('⚠️ Meteora API 返回缺少累计领取USD字段');
+      }
+    } catch (e) {
+      console.log('⚠️ 调用 Meteora API 获取累计领取USD失败:', e instanceof Error ? e.message : String(e));
+    }
+
     // 获取可领取费用（原始值）
     const claimableFeeX = position.positionData.feeX;  // X 费用
     const claimableFeeY = position.positionData.feeY;  // SOL 费用
@@ -304,9 +385,15 @@ async function claimAllRewardsByPosition() {
     console.log('X代币名称:', xTokenName);
     console.log('价格系数 c:', c);
     
-    // 计算 claimableFeeX * c
-    const feeValue = actualClaimableFeeX * c;
-    console.log(`${xTokenName}费用价值 (${xTokenName} * c):`, feeValue);
+    // 使用 data/prices/<ca>.json 的最新价格计算 X 费用价值
+    const caForX = readTokenContractAddressFromPoolJson(poolAddress.toString());
+    const latestXPrice = caForX ? readUsdPriceFromCache(caForX) : undefined;
+    if (latestXPrice === undefined) {
+      console.log('⚠️ 未找到 X 的本地最新价格(data/prices/<ca>.json)，跳过领取');
+      return;
+    }
+    const feeValue = actualClaimableFeeX * latestXPrice;
+    console.log(`${xTokenName}费用价值 (${xTokenName} * latestPrice):`, feeValue);
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
     if (feeValue > 0.5) {

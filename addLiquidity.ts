@@ -332,7 +332,7 @@ async function addLiquidityWithExtendedPosition(
   
   // 步骤2: 添加流动性到扩展仓位
   const strategy = {
-    strategyType: StrategyType.BidAsk,
+    strategyType: StrategyType.Spot,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -415,7 +415,7 @@ function calculateNewBinRange(
 }
 
 /**
- * 完整的BidAsk策略流程（支持大于70个bins）
+ * 完整的Spot策略流程（支持大于70个bins）
  * @param dlmmPool DLMM池实例
  * @param userKeypair 用户密钥对
  * @param tokenXAmount Token X 数量
@@ -424,7 +424,7 @@ function calculateNewBinRange(
  * @param maxBinId 最大bin ID
  * @param slippage 滑点百分比
  */
-async function completeBidAskStrategyFlow(
+async function completeSpotStrategyFlow(
   dlmmPool: any,
   userKeypair: Keypair,
   tokenXAmount: BN,
@@ -434,7 +434,7 @@ async function completeBidAskStrategyFlow(
   slippage: number = 0.1
 ): Promise<{ positionKeypair: Keypair; createTxHash: string; addLiquidityTxHash: string }> {
   
-  console.log('=== 开始完整的BidAsk策略流程 ===');
+  console.log('=== 开始完整的Spot策略流程 ===');
   
   // 步骤1: 创建扩展空仓位
   console.log('步骤1: 创建扩展空仓位');
@@ -461,10 +461,10 @@ async function completeBidAskStrategyFlow(
   await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
   console.log('✅ 创建交易已确认');
   
-  // 步骤3: 添加BidAsk策略流动性
-  console.log('步骤3: 添加BidAsk策略流动性');
+  // 步骤3: 添加Spot策略流动性
+  console.log('步骤3: 添加Spot策略流动性');
   const strategy = {
-    strategyType: StrategyType.BidAsk,
+    strategyType: StrategyType.Spot,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -490,7 +490,7 @@ async function completeBidAskStrategyFlow(
   await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
   console.log('✅ 添加流动性交易已确认');
   
-  console.log('=== BidAsk策略流程完成 ===');
+  console.log('=== Spot策略流程完成 ===');
   console.log('- 仓位地址:', positionKeypair.publicKey.toString());
   console.log('- 创建交易:', createTxHash);
   console.log('- 添加流动性交易:', addLiquidityTxHash);
@@ -911,7 +911,7 @@ async function main() {
     // 使用addLiquidityByStrategy添加流动性
     try {
       const strategy = {
-        strategyType: StrategyType.BidAsk,
+        strategyType: StrategyType.Spot,
         minBinId: minBinId,
         maxBinId: maxBinId,
       };
@@ -986,7 +986,7 @@ async function main() {
 export {
   createExtendedEmptyPosition,
   addLiquidityWithExtendedPosition,
-  completeBidAskStrategyFlow,
+  completeSpotStrategyFlow,
   main
 };
 
