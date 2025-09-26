@@ -27,7 +27,7 @@ dotenv.config();
  */
 async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
   const maxWaitTime = 30000; // 最多等待30秒
-  const checkInterval = 1500; // 每1.5秒检查一次
+  const checkInterval = 2000; // 每2秒检查一次
   const startTime = Date.now();
   
   console.log(`🔍 开始检查代币余额: ${ca}`);
@@ -334,6 +334,10 @@ async function claimAllRewardsByPosition() {
         if (xUsdPrice !== undefined && solUsdPrice !== undefined) {
           const currentPositionUsd = currentX * xUsdPrice + currentY * solUsdPrice;
           const sumUsd = totalUsd + currentPositionUsd;
+          console.log('currentX为:', currentX);
+          console.log('currentY为:', currentY);
+          console.log('xUsdPrice为:', xUsdPrice);
+          console.log('solUsdPrice为:', solUsdPrice);
           console.log(`💰 当前position价值(USD): X=${(currentX * xUsdPrice).toFixed(6)}, Y=${(currentY * solUsdPrice).toFixed(6)}, sum=${currentPositionUsd.toFixed(6)}`);
           console.log(`💰 累计已领取USD + 当前positionUSD: ${(sumUsd).toFixed(6)}`);
           console.log(`🪙 1 SOL 的USD价格: ${solUsdPrice}`);

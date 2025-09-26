@@ -76,19 +76,55 @@ const priceMonitorStates = new Map<string, PriceMonitorState>();
 interface ZeroXMonitorState {
   zeroSince: number | null;   // 开始为0的时间戳(ms)
 }
-const zeroXStates = new Map<string, ZeroXMonitorState>();
+
+const ZERO_X_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data', '.zeroXStates.json');
+
+// 从文件加载状态
+function loadZeroXStates(): Map<string, ZeroXMonitorState> {
+  try {
+    if (!fs.existsSync(ZERO_X_STATES_FILE)) {
+      return new Map();
+    }
+    const raw = fs.readFileSync(ZERO_X_STATES_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    const states = new Map<string, ZeroXMonitorState>();
+    for (const [key, value] of Object.entries(data)) {
+      states.set(key, value as ZeroXMonitorState);
+    }
+    return states;
+  } catch (_) {
+    return new Map();
+  }
+}
+
+// 保存状态到文件
+function saveZeroXStates(states: Map<string, ZeroXMonitorState>): void {
+  try {
+    const data: Record<string, ZeroXMonitorState> = {};
+    for (const [key, value] of states.entries()) {
+      data[key] = value;
+    }
+    fs.writeFileSync(ZERO_X_STATES_FILE, JSON.stringify(data, null, 2));
+  } catch (_) {
+    // 忽略写入错误
+  }
+}
+
+const zeroXStates = loadZeroXStates();
 
 function getZeroXState(poolAddress: string): ZeroXMonitorState {
   let st = zeroXStates.get(poolAddress);
   if (!st) {
     st = { zeroSince: null };
     zeroXStates.set(poolAddress, st);
+    saveZeroXStates(zeroXStates);
   }
   return st;
 }
 
 function clearZeroXState(poolAddress: string): void {
   zeroXStates.delete(poolAddress);
+  saveZeroXStates(zeroXStates);
 }
 
 async function getPositionTotalXAmount(poolAddress: string, positionAddress: string): Promise<bigint | null> {
@@ -122,14 +158,15 @@ async function checkZeroXAndMaybeRemove(poolAddress: string, positionAddress: st
   if (amount === 0n) {
     if (st.zeroSince === null) {
       st.zeroSince = now;
+      saveZeroXStates(zeroXStates);
       console.log(`🧪 发现X为0，开始计时: pool=${poolAddress}，连续第1分钟`);
     } else {
       const mins = (now - st.zeroSince) / (1000 * 60);
       const consecutive = Math.floor(mins) + 1; // 连续第N分钟（首分钟记为1）
       console.log(`🧪 X为0，连续第${consecutive}分钟`);
-      if (mins >= 30) {
-        console.log('⛔ X为0已持续30分钟，执行移除流动性');
-        await executeRemoveLiquidity(poolAddress, positionAddress, 'X为0持续30分钟');
+      if (mins >= 28) {
+        console.log('⛔ X为0已持续28分钟，执行移除流动性');
+        await executeRemoveLiquidity(poolAddress, positionAddress, 'X为0持续28分钟');
         clearZeroXState(poolAddress);
       }
     }

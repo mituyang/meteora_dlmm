@@ -457,29 +457,29 @@ func processNewJSONFile(jsonFilePath string) {
 
 // startGlobalClaimRewardsTicker 全局领取奖励定时任务，扫描data目录下所有JSON文件
 func startGlobalClaimRewardsTicker() {
-	logOutput("🕐 启动全局领取奖励定时任务（每分钟02秒和32秒）\n")
+	logOutput("🕐 启动全局领取奖励定时任务（每分钟10秒和40秒）\n")
 
-	// 计算到下一个02秒的时间
+	// 计算到下一个10秒和40秒的时间
 	now := time.Now()
 	nextMinute := now.Truncate(time.Minute).Add(time.Minute)
-	nextTarget02 := nextMinute.Add(2 * time.Second)  // 02秒
-	nextTarget32 := nextMinute.Add(32 * time.Second) // 32秒
+	nextTarget10 := nextMinute.Add(10 * time.Second) // 10秒
+	nextTarget40 := nextMinute.Add(40 * time.Second) // 40秒
 
-	// 如果当前时间已经过了这分钟的02秒，则等到下一分钟的02秒
-	if now.After(nextTarget02) {
-		nextTarget02 = nextTarget02.Add(time.Minute)
+	// 如果当前时间已经过了这分钟的10秒，则等到下一分钟的10秒
+	if now.After(nextTarget10) {
+		nextTarget10 = nextTarget10.Add(time.Minute)
 	}
-	// 如果当前时间已经过了这分钟的32秒，则等到下一分钟的32秒
-	if now.After(nextTarget32) {
-		nextTarget32 = nextTarget32.Add(time.Minute)
+	// 如果当前时间已经过了这分钟的40秒，则等到下一分钟的40秒
+	if now.After(nextTarget40) {
+		nextTarget40 = nextTarget40.Add(time.Minute)
 	}
 
 	// 选择最近的时间点
 	var nextTarget time.Time
-	if nextTarget02.Before(nextTarget32) {
-		nextTarget = nextTarget02
+	if nextTarget10.Before(nextTarget40) {
+		nextTarget = nextTarget10
 	} else {
-		nextTarget = nextTarget32
+		nextTarget = nextTarget40
 	}
 
 	initialDelay := nextTarget.Sub(now)
@@ -497,7 +497,7 @@ func startGlobalClaimRewardsTicker() {
 	// 立即执行一次
 	executeGlobalClaimRewards()
 
-	// 然后每分钟的02秒和32秒执行
+	// 然后每分钟的10秒和40秒执行
 	ticker := time.NewTicker(1 * time.Second) // 每秒检查一次
 	defer ticker.Stop()
 
@@ -509,8 +509,8 @@ func startGlobalClaimRewardsTicker() {
 		case <-ticker.C:
 			now := time.Now()
 			second := now.Second()
-			// 在02秒和32秒时执行
-			if second == 2 || second == 32 {
+			// 在10秒和40秒时执行
+			if second == 10 || second == 40 {
 				executeGlobalClaimRewards()
 			}
 		}
@@ -1018,7 +1018,7 @@ func executeJupSwapForToken(ca string) {
 	defer cancel()
 
 	// 执行jupSwap命令
-	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "500000")
+	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "50000")
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
 
 	// 执行命令并捕获输出
