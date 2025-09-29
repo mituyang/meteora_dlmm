@@ -69,8 +69,42 @@ interface PriceMonitorState {
   c: number;
 }
 
-// 全局监控状态存储
-const priceMonitorStates = new Map<string, PriceMonitorState>();
+// 监控状态文件路径
+const PRICE_MONITOR_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data', '.priceMonitorStates.json');
+
+// 从文件加载监控状态
+function loadPriceMonitorStates(): Map<string, PriceMonitorState> {
+  try {
+    if (!fs.existsSync(PRICE_MONITOR_STATES_FILE)) {
+      return new Map();
+    }
+    const raw = fs.readFileSync(PRICE_MONITOR_STATES_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    const states = new Map<string, PriceMonitorState>();
+    for (const [key, value] of Object.entries(data)) {
+      states.set(key, value as PriceMonitorState);
+    }
+    return states;
+  } catch (_) {
+    return new Map();
+  }
+}
+
+// 保存监控状态到文件
+function savePriceMonitorStates(states: Map<string, PriceMonitorState>): void {
+  try {
+    const data: Record<string, PriceMonitorState> = {};
+    for (const [key, value] of states.entries()) {
+      data[key] = value;
+    }
+    fs.writeFileSync(PRICE_MONITOR_STATES_FILE, JSON.stringify(data, null, 2));
+  } catch (_) {
+    // 忽略写入错误
+  }
+}
+
+// 全局监控状态存储（从文件加载）
+const priceMonitorStates = loadPriceMonitorStates();
 
 // ===== 仓位X为0的连续监控（每池）=====
 interface ZeroXMonitorState {
@@ -301,6 +335,7 @@ async function executeRemoveLiquidity(poolAddress: string, positionAddress: stri
     
     // 移除流动性后，清除监控状态
     priceMonitorStates.delete(poolAddress);
+    savePriceMonitorStates(priceMonitorStates); // 保存到文件
     console.log(`🧹 已清除池 ${poolAddress} 的监控状态`);
   } catch (error) {
     console.error('❌ 移除流动性操作失败:', error);
@@ -327,6 +362,7 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   };
   
   priceMonitorStates.set(poolAddress, monitorState);
+  savePriceMonitorStates(priceMonitorStates); // 保存到文件
   
   console.log(`🔍 开始监控池 ${poolAddress} 的价格变化`);
   console.log(`   初始阈值 (c * 0.4): ${initialThreshold}`);
@@ -368,6 +404,7 @@ async function checkPriceMonitoring(poolAddress: string, currentPrice: number): 
   // 更新最后检查时间
   monitorState.lastCheckTime = now;
   priceMonitorStates.set(poolAddress, monitorState);
+  savePriceMonitorStates(priceMonitorStates); // 保存到文件
   
   console.log(`⏳ 继续监控，下次检查将在1分钟后`);
   return false;
@@ -381,6 +418,30 @@ function getMonitoringPoolAddresses(): string[] {
     const state = priceMonitorStates.get(poolAddress);
     return state && state.isMonitoring;
   });
+}
+
+/**
+ * 清除过期的监控状态（超过24小时的监控状态）
+ */
+function clearExpiredMonitorStates(): void {
+  const now = Date.now();
+  const expiredPools: string[] = [];
+  
+  for (const [poolAddress, state] of priceMonitorStates.entries()) {
+    const elapsedHours = (now - state.startTime) / (1000 * 60 * 60);
+    if (elapsedHours > 24) {
+      expiredPools.push(poolAddress);
+    }
+  }
+  
+  for (const poolAddress of expiredPools) {
+    priceMonitorStates.delete(poolAddress);
+    console.log(`🧹 清除过期监控状态: ${poolAddress}`);
+  }
+  
+  if (expiredPools.length > 0) {
+    savePriceMonitorStates(priceMonitorStates);
+  }
 }
 
 /**
@@ -461,6 +522,9 @@ export async function fetchOkxLatestPrice(tokenContractAddress: string): Promise
  */
 async function main() {
   try {
+    // 清除过期的监控状态
+    clearExpiredMonitorStates();
+    
     // 解析参数
     const poolAddress = resolvePoolAddressFromArgs();
     const tokenAddress = resolveTokenAddressFromArgs();
@@ -497,13 +561,18 @@ async function main() {
         console.log(`  c 值: ${poolData.c}`);
         
         // 检查是否已经在监控中
-        const isMonitoring = priceMonitorStates.has(poolAddress) && 
-                           priceMonitorStates.get(poolAddress)!.isMonitoring;
+        const existingState = priceMonitorStates.get(poolAddress);
+        const isMonitoring = existingState && existingState.isMonitoring;
         
         if (isMonitoring) {
           // 如果已经在监控中，检查监控状态
           console.log(`🔍 池 ${poolAddress} 正在监控中，检查价格变化...`);
-          await checkPriceMonitoring(poolAddress, currentPrice);
+          const shouldStop = await checkPriceMonitoring(poolAddress, currentPrice);
+          if (shouldStop) {
+            // 监控已结束（触发移除流动性或超时），清除状态
+            priceMonitorStates.delete(poolAddress);
+            savePriceMonitorStates(priceMonitorStates);
+          }
         } else if (currentPrice < initialThreshold) {
           // 如果价格低于初始阈值且未在监控，开始监控
           console.log(`⚠️  当前价格 ${currentPrice} 低于初始阈值 ${initialThreshold}，开始价格监控`);

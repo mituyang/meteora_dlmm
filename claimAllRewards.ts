@@ -96,7 +96,7 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 50000`;
+    const command = `./jupSwap -input ${ca} -maxfee 500000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
@@ -410,10 +410,10 @@ async function claimAllRewardsByPosition() {
     // 上方止盈判断处已输出“未领取费用USD价值”，此处不再重复打印
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
-    if (feeValue > 0.5) {
-      console.log(`✅ ${xTokenName}费用价值大于 0.5，继续领取...`);
+    if (feeValue > 1) {
+      console.log(`✅ ${xTokenName}费用价值大于 1，继续领取...`);
     } else {
-      console.log(`❌ ${xTokenName}费用价值小于等于 0.5，跳过领取`);
+      console.log(`❌ ${xTokenName}费用价值小于等于 1，跳过领取`);
       return;
     }
 

@@ -411,7 +411,10 @@ async function removeLiquidity() {
     // 移除流动性成功后执行 jupSwap
     const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
     if (ca) {
-      console.log(`🔄 移除流动性成功，开始执行 jupSwap: ${ca}`);
+      console.log(`🔄 移除流动性成功，等待10秒后开始执行 jupSwap: ${ca}`);
+      console.log('⏳ 等待10秒让区块链状态更新...');
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      console.log('✅ 等待完成，开始执行 jupSwap');
       const jupSwapSuccess = await executeJupSwap(ca);
       
       // 如果jupSwap执行成功，移动JSON文件到history目录

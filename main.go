@@ -681,6 +681,53 @@ func getAllTokenContractAddresses() map[string]string {
 	return tokenAddresses
 }
 
+// 通过 ca 反查 poolAddress（遍历 data 目录中每个池的 JSON，匹配顶层 ca 或 data.ca）
+
+// 从 data/<pool>.json 读取 last_updated_first（优先顶层，其次 data.last_updated_first）
+func readLastUpdatedFirstFromPoolJSON(poolAddress string) string {
+	dataPath := "/Users/yqw/meteora_dlmm/data/" + poolAddress + ".json"
+	bytes, err := os.ReadFile(dataPath)
+	if err != nil {
+		return ""
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(bytes, &obj); err != nil {
+		return ""
+	}
+	if v, ok := obj["last_updated_first"].(string); ok && v != "" {
+		return v
+	}
+	if m, ok := obj["data"].(map[string]interface{}); ok {
+		if v, ok := m["last_updated_first"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// 解析 last_updated_first（格式: 2006-01-02 15:04:05，按东八区解析）
+func parseLastUpdatedFirstToTime(lastUpdatedFirst string) (time.Time, error) {
+	lastUpdatedFirst = strings.TrimSpace(lastUpdatedFirst)
+	if lastUpdatedFirst == "" {
+		return time.Time{}, fmt.Errorf("empty last_updated_first")
+	}
+	// 支持包含 T 或 %20 的情况，替换为空格
+	lastUpdatedFirst = strings.ReplaceAll(lastUpdatedFirst, "T", " ")
+	lastUpdatedFirst = strings.ReplaceAll(lastUpdatedFirst, "%20", " ")
+	// 去除可能包裹的引号
+	lastUpdatedFirst = strings.Trim(lastUpdatedFirst, "\"'")
+
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	if loc == nil {
+		loc = time.FixedZone("CST8", 8*60*60)
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", lastUpdatedFirst, loc)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t, nil
+}
+
 // 执行价格获取命令（仅获取价格，不执行交易）
 func fetchPriceForToken(poolAddress, tokenContractAddress string) {
 	// 使用专门的价格获取脚本
@@ -771,6 +818,103 @@ func startPriceFetcherTicker() {
 	}
 }
 
+// 显示position存在时间
+func displayPositionExistenceTime(poolAddress string) {
+	// 读取 last_updated_first
+	lastStr := readLastUpdatedFirstFromPoolJSON(poolAddress)
+	if lastStr == "" {
+		return // 没有时间信息，跳过显示
+	}
+
+	// 解析时间
+	lastTime, err := parseLastUpdatedFirstToTime(lastStr)
+	if err != nil {
+		return // 解析失败，跳过显示
+	}
+
+	// 计算存在时间
+	now := time.Now()
+	existenceDuration := now.Sub(lastTime)
+	existenceHours := existenceDuration.Hours()
+	existenceMinutes := existenceDuration.Minutes()
+
+	// 格式化显示
+	var timeStr string
+	if existenceHours >= 1 {
+		timeStr = fmt.Sprintf("%.1f小时", existenceHours)
+	} else {
+		timeStr = fmt.Sprintf("%.0f分钟", existenceMinutes)
+	}
+
+	// 检查是否超过5小时
+	var status string
+	if existenceDuration >= 5*time.Hour {
+		status = "🚨 已超时！需要立即移除"
+	} else {
+		remaining := 5*time.Hour - existenceDuration
+		remainingMinutes := remaining.Minutes()
+		status = fmt.Sprintf("⏳ 剩余%.0f分钟", remainingMinutes)
+	}
+
+	logOutput("📅 Position存在时间: %s (%s) - %s\n", timeStr, status, poolAddress)
+}
+
+// 检查并执行5小时超时移除流动性
+func checkAndExecute5HourTimeout(poolAddress string) {
+	// 读取 last_updated_first
+	lastStr := readLastUpdatedFirstFromPoolJSON(poolAddress)
+	if lastStr == "" {
+		return // 没有时间信息，跳过检查
+	}
+
+	// 解析时间
+	lastTime, err := parseLastUpdatedFirstToTime(lastStr)
+	if err != nil {
+		logOutput("⚠️ 解析 last_updated_first 失败 [pool: %s]: %v\n", poolAddress, err)
+		return
+	}
+
+	// 检查是否超过5小时
+	if time.Since(lastTime) >= 5*time.Hour {
+		// 读取 positionAddress 并立即执行移除流动性
+		positionAddress := readPositionFromPoolJSON(poolAddress)
+		if positionAddress != "" {
+			existenceDuration := time.Since(lastTime)
+			existenceHours := existenceDuration.Hours()
+			logOutput("🚨 检测到超时！Position已存在%.1f小时，立即执行移除流动性: pool=%s position=%s\n",
+				existenceHours, poolAddress, positionAddress)
+
+			// 立即执行移除流动性（同步执行，确保立即处理）
+			rmCtx, rmCancel := context.WithTimeout(globalCtx, 2*time.Minute)
+			defer rmCancel()
+
+			rmCmd := exec.CommandContext(rmCtx, "npx", "ts-node", "removeLiquidity.ts",
+				fmt.Sprintf("--pool=%s", poolAddress),
+				fmt.Sprintf("--position=%s", positionAddress),
+			)
+			rmCmd.Dir = "/Users/yqw/meteora_dlmm"
+
+			logOutput("🔄 正在执行移除流动性命令...\n")
+			out, err := rmCmd.CombinedOutput()
+			logOutput("%s", string(out))
+
+			if err != nil {
+				if rmCtx.Err() == context.DeadlineExceeded {
+					logOutput("❌ 移除流动性超时（2分钟）[pool: %s]\n", poolAddress)
+				} else if rmCtx.Err() == context.Canceled {
+					logOutput("❌ 移除流动性被取消 [pool: %s]\n", poolAddress)
+				} else {
+					logOutput("❌ 移除流动性失败 [pool: %s]: %v\n", poolAddress, err)
+				}
+			} else {
+				logOutput("✅ 移除流动性执行完成 [pool: %s]\n", poolAddress)
+			}
+		} else {
+			logOutput("⚠️ 找不到 positionAddress，无法移除流动性: pool=%s\n", poolAddress)
+		}
+	}
+}
+
 // 执行价格获取
 func executePriceFetch() {
 	logOutput("🔄 开始价格获取 - %s\n", time.Now().Format("15:04:05"))
@@ -786,6 +930,13 @@ func executePriceFetch() {
 	// 顺序获取所有token的价格（避免OKX API限制）
 	for poolAddress, tokenAddress := range tokenAddresses {
 		logOutput("🔄 正在获取价格: %s -> %s\n", poolAddress, tokenAddress)
+
+		// 显示position存在时间
+		displayPositionExistenceTime(poolAddress)
+
+		// 检查5小时限制（在价格获取前检查）
+		checkAndExecute5HourTimeout(poolAddress)
+
 		fetchPriceForToken(poolAddress, tokenAddress)
 
 		// 添加延迟避免API限制
@@ -1013,12 +1164,14 @@ func executeJupSwapForToken(ca string) {
 	default:
 	}
 
+	// 注意：5小时超时检查已移至价格获取定时任务中，避免重复检查
+
 	// 创建带超时的上下文（每个代币最多30秒）
 	ctx, cancel := context.WithTimeout(globalCtx, 30*time.Second)
 	defer cancel()
 
 	// 执行jupSwap命令
-	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "50000")
+	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "500000")
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
 
 	// 执行命令并捕获输出
