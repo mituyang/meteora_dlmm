@@ -403,30 +403,29 @@ async function removeLiquidity() {
     
     // 可通过 --skipSwap 控制是否在移除后立即执行 jupSwap（默认执行）
     const skipSwap = getSkipSwapFromArgs();
+
     if (skipSwap) {
       console.log('⏭️ 检测到 --skipSwap，跳过移除后的 jupSwap');
-      return;
+    } else {
+      const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
+      if (ca) {
+        console.log(`🔄 移除流动性成功，等待10秒后开始执行 jupSwap: ${ca}`);
+        console.log('⏳ 等待10秒让区块链状态更新...');
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        console.log('✅ 等待完成，开始执行 jupSwap');
+        const jupSwapSuccess = await executeJupSwap(ca);
+
+        if (jupSwapSuccess) {
+          console.log('🔄 jupSwap执行成功');
+        } else {
+          console.log('⚠️ jupSwap执行失败，仍将归档池配置JSON文件');
+        }
+      } else {
+        console.log('⚠️ 未找到 token 合约地址，跳过 jupSwap');
+      }
     }
 
-    // 移除流动性成功后执行 jupSwap
-    const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
-    if (ca) {
-      console.log(`🔄 移除流动性成功，等待10秒后开始执行 jupSwap: ${ca}`);
-      console.log('⏳ 等待10秒让区块链状态更新...');
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      console.log('✅ 等待完成，开始执行 jupSwap');
-      const jupSwapSuccess = await executeJupSwap(ca);
-      
-      // 如果jupSwap执行成功，移动JSON文件到history目录
-      if (jupSwapSuccess) {
-        console.log('🔄 jupSwap执行成功，开始移动JSON文件到history目录');
-        await moveJsonToHistory(finalPoolAddress);
-      } else {
-        console.log('⚠️ jupSwap执行失败，保留JSON文件');
-      }
-    } else {
-      console.log('⚠️ 未找到 token 合约地址，跳过 jupSwap');
-    }
+    await moveJsonToHistory(finalPoolAddress);
     
   } catch (error) {
     console.error('错误:', error);
