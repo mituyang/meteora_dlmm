@@ -428,7 +428,11 @@ func processNewJSONFile(jsonFilePath string) {
 	if lastUpdatedFirst != "" {
 		args = append(args, fmt.Sprintf("--last_updated_first=%s", lastUpdatedFirst))
 	}
-	cmd := exec.Command("npx", args...)
+	// 创建带超时的上下文（5分钟超时）
+	ctx, cancel := context.WithTimeout(globalCtx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "npx", args...)
 
 	// 设置工作目录为当前目录
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
@@ -444,7 +448,11 @@ func processNewJSONFile(jsonFilePath string) {
 
 	// 检查是否有错误
 	if err != nil {
-		log.Printf("❌ 执行addLiquidity.ts失败: %v", err)
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("⏰ 执行addLiquidity.ts超时（5分钟）: %v", err)
+		} else {
+			log.Printf("❌ 执行addLiquidity.ts失败: %v", err)
+		}
 		return
 	}
 

@@ -369,15 +369,46 @@ async function removeLiquidity() {
     console.log('Bin范围:', `${lowerBinId} - ${upperBinId}`);
     
     // 5. 调用removeLiquidity方法 - 默认移除所有流动性
-    const transactions = await withRetry(() => dlmmPool.removeLiquidity({
-      user: new PublicKey(process.env.USER_WALLET_ADDRESS!),  // 用户公钥 (从.env读取)
-      position: positionPubKey,              // 仓位公钥
-      fromBinId: lowerBinId,                 // 下限bin ID
-      toBinId: upperBinId,                   // 上限bin ID
-      bps: new BN(10000),                    // 移除100%流动性 (10000 BPS = 100%) - 默认移除所有流动性
-      shouldClaimAndClose: true,             // 领取奖励并关闭仓位 - 默认true
-      skipUnwrapSOL: false                   // 不解包SOL - 默认false
-    }), 'dlmmPool.removeLiquidity');
+    let transactions;
+    try {
+      transactions = await withRetry(() => dlmmPool.removeLiquidity({
+        user: new PublicKey(process.env.USER_WALLET_ADDRESS!),  // 用户公钥 (从.env读取)
+        position: positionPubKey,              // 仓位公钥
+        fromBinId: lowerBinId,                 // 下限bin ID
+        toBinId: upperBinId,                   // 上限bin ID
+        bps: new BN(10000),                    // 移除100%流动性 (10000 BPS = 100%) - 默认移除所有流动性
+        shouldClaimAndClose: true,             // 领取奖励并关闭仓位 - 默认true
+        skipUnwrapSOL: false                   // 不解包SOL - 默认false
+      }), 'dlmmPool.removeLiquidity');
+    } catch (error) {
+      // 如果没有流动性可移除，尝试直接关闭仓位
+      if (error instanceof Error && (error.message.includes('No liquidity to remove') || error.message.includes('Cannot read properties of null'))) {
+        console.log('⚠️ 仓位中没有流动性或仓位数据为空，尝试直接关闭仓位...');
+        try {
+          // 获取仓位对象
+          const position = await withRetry(() => dlmmPool.getPosition(positionPubKey), 'dlmmPool.getPosition');
+          
+          // 使用 closePositionIfEmpty 方法关闭空仓位
+          const closeTransaction = await withRetry(() => dlmmPool.closePositionIfEmpty({
+            owner: new PublicKey(process.env.USER_WALLET_ADDRESS!),
+            position: position
+          }), 'dlmmPool.closePositionIfEmpty');
+          
+          transactions = [closeTransaction];
+          console.log('✅ 成功生成关闭空仓位交易');
+        } catch (closeError) {
+          console.log('❌ 关闭仓位也失败:', closeError instanceof Error ? closeError.message : String(closeError));
+          // 如果关闭也失败，可能是仓位已经被关闭或不存在
+          if (closeError instanceof Error && closeError.message.includes('Cannot read properties of null')) {
+            console.log('ℹ️ 仓位可能已经被关闭或不存在，无需进一步操作');
+            return; // 直接返回，不抛出错误
+          }
+          throw closeError;
+        }
+      } else {
+        throw error;
+      }
+    }
     
     console.log(`生成了 ${transactions.length} 个交易`);
     

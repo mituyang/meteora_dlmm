@@ -486,9 +486,31 @@ async function completeBidAskStrategyFlow(
   const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
   console.log('✅ 添加流动性交易已发送:', addLiquidityTxHash);
   
-  // 等待交易确认
-  await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
-  console.log('✅ 添加流动性交易已确认');
+  // 等待交易确认（带重试和状态检查）
+  console.log('等待添加流动性交易确认...');
+  let addLiquidityConfirmed = false;
+  let addLiquidityAttempts = 0;
+  const maxAddLiquidityAttempts = 30;
+  while (!addLiquidityConfirmed && addLiquidityAttempts < maxAddLiquidityAttempts) {
+    const status = await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+    if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+      // 检查交易是否成功（没有错误）
+      if (status.value?.err === null) {
+        addLiquidityConfirmed = true;
+        console.log('✅ 添加流动性交易已确认并成功');
+      } else {
+        console.log('❌ 添加流动性交易失败:', status.value?.err);
+        throw new Error(`添加流动性交易失败: ${JSON.stringify(status.value?.err)}`);
+      }
+    } else {
+      console.log(`等待添加流动性确认中... (${addLiquidityAttempts + 1}/${maxAddLiquidityAttempts})`);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      addLiquidityAttempts++;
+    }
+  }
+  if (!addLiquidityConfirmed) {
+    throw new Error('添加流动性交易确认超时');
+  }
   
   console.log('=== BidAsk策略流程完成 ===');
   console.log('- 仓位地址:', positionKeypair.publicKey.toString());
@@ -933,9 +955,31 @@ async function main() {
       const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
       console.log('添加流动性交易哈希:', addLiquidityTxHash);
       
-      // 等待交易确认
-      await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
-      console.log('添加流动性交易已确认');
+      // 等待交易确认（带重试和状态检查）
+      console.log('等待添加流动性交易确认...');
+      let addLiquidityConfirmed = false;
+      let addLiquidityAttempts = 0;
+      const maxAddLiquidityAttempts = 30;
+      while (!addLiquidityConfirmed && addLiquidityAttempts < maxAddLiquidityAttempts) {
+        const status = await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+        if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+          // 检查交易是否成功（没有错误）
+          if (status.value?.err === null) {
+            addLiquidityConfirmed = true;
+            console.log('✅ 添加流动性交易已确认并成功');
+          } else {
+            console.log('❌ 添加流动性交易失败:', status.value?.err);
+            throw new Error(`添加流动性交易失败: ${JSON.stringify(status.value?.err)}`);
+          }
+        } else {
+          console.log(`等待添加流动性确认中... (${addLiquidityAttempts + 1}/${maxAddLiquidityAttempts})`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          addLiquidityAttempts++;
+        }
+      }
+      if (!addLiquidityConfirmed) {
+        throw new Error('添加流动性交易确认超时');
+      }
       
       console.log('=== 交易完成 ===');
       console.log('仓位地址:', positionPubKey!.toString());
@@ -969,11 +1013,61 @@ async function main() {
       }
       
     } catch (error) {
+      console.log('❌ 添加流动性过程中发生错误:');
       console.log(JSON.stringify({
         addLiquidityByStrategy: {
           error: error instanceof Error ? error.message : String(error)
         }
       }, null, 2));
+      
+      // 如果添加流动性失败且创建了新仓位，尝试关闭空仓位
+      if (createdNewPosition && positionPubKey) {
+        console.log('🚨 添加流动性失败，尝试关闭刚创建的空仓位...');
+        try {
+          await closeEmptyPosition(dlmmPool, userKeypair, positionPubKey, minBinId, maxBinId);
+          console.log('✅ 空仓位已关闭');
+          
+          // 清理JSON文件中的positionAddress，恢复到执行前状态
+          try {
+            let json: any = {};
+            try {
+              const raw = fs.readFileSync(poolFile, 'utf8');
+              json = JSON.parse(raw);
+            } catch (e) {
+              json = {};
+            }
+            // 移除addLiquidity.ts添加的字段
+            delete json.positionAddress;
+            delete json.c;
+            if (json.data && typeof json.data === 'object') {
+              delete json.data.positionAddress;
+              delete json.data.c;
+            }
+            fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
+            console.log('✅ 已清理JSON文件中的positionAddress和c字段，恢复到执行前状态');
+          } catch (cleanupError) {
+            console.log('⚠️ 清理JSON文件失败:', cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
+          }
+          
+          // 等待区块链状态更新
+          console.log('⏳ 等待3秒让区块链状态更新...');
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          console.log('✅ 等待完成，准备重新执行');
+          
+          // 重新执行整个addLiquidity流程
+          console.log('🔄 重新执行addLiquidity.ts...');
+          await main();
+          
+        } catch (closeError) {
+          console.error('❌ 关闭空仓位失败:', closeError instanceof Error ? closeError.message : String(closeError));
+          console.log('⚠️ 请手动检查并关闭仓位:', positionPubKey.toString());
+        }
+      } else if (positionPubKey) {
+        console.log('⚠️ 添加流动性失败，但未创建新仓位，请检查仓位状态:', positionPubKey.toString());
+      }
+      
+      // 重新抛出错误，让上层知道执行失败
+      throw error;
     }
 
     
@@ -982,11 +1076,56 @@ async function main() {
   }
 }
 
+/**
+ * 关闭空仓位
+ */
+async function closeEmptyPosition(
+  dlmmPool: any,
+  userKeypair: Keypair,
+  positionPubKey: PublicKey,
+  minBinId: number,
+  maxBinId: number
+): Promise<void> {
+  try {
+    console.log('🔧 尝试关闭空仓位...');
+    
+    // 获取仓位对象
+    const position = await dlmmPool.getPosition(positionPubKey);
+    
+    // 使用 closePositionIfEmpty 方法关闭空仓位
+    const closeTransaction = await dlmmPool.closePositionIfEmpty({
+      owner: userKeypair.publicKey,
+      position: position
+    });
+    
+    console.log('生成了关闭空仓位交易');
+    
+    // 执行交易
+    console.log('执行关闭仓位交易...');
+    closeTransaction.sign(userKeypair as any);
+    const versionedTransaction = new VersionedTransaction(closeTransaction.compileMessage());
+    versionedTransaction.sign([userKeypair as any]);
+    
+    const txHash = await connection.sendTransaction(versionedTransaction);
+    console.log('关闭仓位交易哈希:', txHash);
+    
+    await connection.getSignatureStatus(txHash, { searchTransactionHistory: true });
+    console.log('关闭仓位交易已确认');
+    
+    console.log('✅ 空仓位关闭完成');
+  } catch (error) {
+    console.error('❌ 关闭空仓位失败:', error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
+
 // 导出函数供其他模块使用
 export {
   createExtendedEmptyPosition,
   addLiquidityWithExtendedPosition,
   completeBidAskStrategyFlow,
+  closeEmptyPosition,
   main
 };
 
