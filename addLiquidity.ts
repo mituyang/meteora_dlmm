@@ -19,6 +19,13 @@ import path from 'path';
 // 加载环境变量
 dotenv.config();
 
+// 从环境变量读取滑点设置，默认值为0.1
+const DEFAULT_SLIPPAGE = 0.1;
+const SLIPPAGE_FROM_ENV = process.env.SLIPPAGE_TOLERANCE ? parseFloat(process.env.SLIPPAGE_TOLERANCE) : DEFAULT_SLIPPAGE;
+
+// 输出当前滑点设置
+console.log(`📊 滑点容忍度设置: ${SLIPPAGE_FROM_ENV}% ${process.env.SLIPPAGE_TOLERANCE ? '(来自环境变量)' : '(使用默认值)'}`);
+
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
 
@@ -319,7 +326,7 @@ async function addLiquidityWithExtendedPosition(
   tokenYAmount: BN,
   minBinId: number,
   maxBinId: number,
-  slippage: number = 0.1
+  slippage: number = SLIPPAGE_FROM_ENV
 ): Promise<{ createTransaction: Transaction; addLiquidityTransaction: Transaction; positionKeypair: Keypair }> {
   
   // 步骤1: 创建扩展空仓位
@@ -431,7 +438,7 @@ async function completeBidAskStrategyFlow(
   tokenYAmount: BN,
   minBinId: number,
   maxBinId: number,
-  slippage: number = 0.1
+  slippage: number = SLIPPAGE_FROM_ENV
 ): Promise<{ positionKeypair: Keypair; createTxHash: string; addLiquidityTxHash: string }> {
   
   console.log('=== 开始完整的BidAsk策略流程 ===');
@@ -944,7 +951,7 @@ async function main() {
         totalYAmount: tokenYAmount,
         strategy: strategy,
         user: userKeypair.publicKey,
-        slippage: 0.1
+        slippage: SLIPPAGE_FROM_ENV
       });
       
       // 发送并确认添加流动性交易

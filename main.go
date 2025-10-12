@@ -1120,7 +1120,7 @@ func readBanList() map[string]bool {
 		addr = strings.TrimSpace(addr)
 		if addr != "" {
 			banList[addr] = true
-			logOutput("🚫 黑名单ca: %s\n", addr)
+			// logOutput("🚫 黑名单ca: %s\n", addr)
 		}
 	}
 
@@ -1148,7 +1148,7 @@ func parseTokenAddressesFromOutput(output string, banList map[string]bool) []str
 					if len(tokenAddress) >= 32 && len(tokenAddress) <= 44 {
 						// 检查是否在黑名单中
 						if banList[tokenAddress] {
-							logOutput("🚫 跳过黑名单代币: %s\n", tokenAddress)
+							// logOutput("🚫 跳过黑名单代币: %s\n", tokenAddress)
 						} else {
 							tokenAddresses = append(tokenAddresses, tokenAddress)
 							logOutput("🔍 发现代币: %s\n", tokenAddress)
