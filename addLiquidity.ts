@@ -735,7 +735,7 @@ async function main() {
                   // 使用自动模式计算bin范围
                   const leftBins = calculateDynamicLeftBins(binStep);
                   minBinId = currentActiveId - leftBins;
-                  maxBinId = currentActiveId - 1;
+                  maxBinId = currentActiveId ;
                   binRangeCalculated = true;
                   console.log(`🔢 自动模式Bin ID范围:`);
                   console.log(`- Active ID: ${currentActiveId}`);

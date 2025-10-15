@@ -22,6 +22,64 @@ const execAsync = promisify(exec);
 dotenv.config();
 
 /**
+ * 获取 OKX DEX 最新价格（需要鉴权）
+ * POST /api/v5/dex/market/price
+ * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
+ */
+async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
+  const apiKey = process.env.OKX_API_KEY_xKmQ;
+  const secretKey = process.env.OKX_SECRET_KEY_xKmQ;
+  const passphrase = process.env.OKX_PASSPHRASE_xKmQ;
+
+  if (!apiKey || !secretKey || !passphrase) {
+    throw new Error('缺少 OKX API 凭证：请在 .env 中设置 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE');
+  }
+
+  const timestamp = new Date().toISOString();
+  const method = 'POST';
+  const requestPath = '/api/v5/dex/market/price';
+  const bodyArray = [
+    {
+      chainIndex: '501',
+      tokenContractAddress
+    }
+  ];
+  const bodyString = JSON.stringify(bodyArray);
+
+  const prehash = `${timestamp}${method}${requestPath}${bodyString}`;
+  const signature = CryptoJS.enc.Base64.stringify(
+    CryptoJS.HmacSHA256(prehash, secretKey)
+  );
+
+  const url = `https://web3.okx.com${requestPath}`;
+  const headers = {
+    'Content-Type': 'application/json',
+    'OK-ACCESS-KEY': apiKey,
+    'OK-ACCESS-PASSPHRASE': passphrase,
+    'OK-ACCESS-TIMESTAMP': timestamp,
+    'OK-ACCESS-SIGN': signature
+  } as const;
+
+  const resp = await withRetry(() => axios.post(url, bodyArray, { headers }), 'OKX 最新价格');
+  if (!resp?.data) {
+    console.log('OKX 价格响应为空');
+    return undefined;
+  }
+  if (resp.data.code !== '0') {
+    console.log(`OKX 返回错误: code=${resp.data.code}, msg=${resp.data.msg || ''}`);
+    return undefined;
+  }
+  const rows = Array.isArray(resp.data.data) ? resp.data.data : [];
+  const wantAddr = tokenContractAddress;
+  const entry = rows.find((r: any) => r?.chainIndex === '501' && String(r?.tokenContractAddress) === String(wantAddr)) || rows[0];
+  if (!entry?.price) {
+    console.log('OKX 响应中未找到价格字段，原始响应:', JSON.stringify(resp.data));
+    return undefined;
+  }
+  return String(entry.price);
+}
+
+/**
  * 智能等待代币到账并执行 jupSwap
  * @param ca token合约地址
  */
@@ -96,7 +154,7 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 50000`;
+    const command = `./jupSwap -input ${ca} -maxfee 100000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
@@ -322,11 +380,30 @@ async function claimAllRewardsByPosition() {
         const currentX = getRawAmount(position.positionData.totalXAmount) / Math.pow(10, tokenXDecimals);
         const currentY = getRawAmount(position.positionData.totalYAmount) / Math.pow(10, tokenYDecimals);
 
-        // 获取 X 与 SOL 的 USD 价格（只从本地 data/prices 读取最新价格）
+        // 获取 X 与 SOL 的 USD 价格（优先使用 OKX API 实时获取）
         // X 价格文件名为 ca（token 合约地址），来自 pool JSON；非 mint 地址
         const caX = readTokenContractAddressFromPoolJson(poolAddress.toString());
         const solMint = 'So11111111111111111111111111111111111111112';
-        const xUsdPrice = caX ? readUsdPriceFromCache(caX) : undefined;
+        
+        // 优先使用 OKX API 获取 X 代币价格，失败则回退到本地缓存
+        let xUsdPrice: number | undefined;
+        if (caX) {
+          try {
+            console.log('🔄 正在通过 OKX API 获取 X 代币最新价格...');
+            const xPriceStr = await fetchOkxLatestPrice(caX);
+            if (xPriceStr) {
+              xUsdPrice = Number(xPriceStr);
+              console.log(`✅ OKX API 获取 X 代币价格成功: ${xUsdPrice}`);
+            } else {
+              console.log('⚠️ OKX API 获取 X 代币价格失败，回退到本地缓存');
+              xUsdPrice = readUsdPriceFromCache(caX);
+            }
+          } catch (error) {
+            console.log('⚠️ OKX API 获取 X 代币价格异常，回退到本地缓存:', error instanceof Error ? error.message : String(error));
+            xUsdPrice = readUsdPriceFromCache(caX);
+          }
+        }
+        
         // SOL 价格通过 fetchPrice.ts 的方法实时获取（字符串转 number）
         const solPriceStr = await fetchOkxLatestPriceFromModule(solMint);
         const solUsdPrice = solPriceStr ? Number(solPriceStr) : undefined;
@@ -401,7 +478,7 @@ async function claimAllRewardsByPosition() {
     const caForX = readTokenContractAddressFromPoolJson(poolAddress.toString());
     const latestXPrice = caForX ? readUsdPriceFromCache(caForX) : undefined;
     if (latestXPrice === undefined) {
-      console.log('⚠️ 未找到 X 的本地最新价格(data/prices/<ca>.json)，跳过领取');
+      console.log('⚠️ 未找到 X 的最新价格，跳过领取');
       return;
     }
     const feeValue = actualClaimableFeeX * latestXPrice;
