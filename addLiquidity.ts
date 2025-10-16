@@ -15,6 +15,7 @@ import axios from 'axios';
 import https from 'https';
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 
 // 加载环境变量
 dotenv.config();
@@ -576,6 +577,72 @@ async function main() {
     let maxBinId: number = 0;
     const binStep = dlmmPool.lbPair.binStep;
     let binRangeCalculated = false; // 标记是否已通过价格比较计算bin范围
+    
+    // 从getBinArrays.ts获取实际的minBinId用于比较
+    let actualMinBinId: number | null = null;
+    try {
+      console.log('🔄 正在调用getBinArrays.ts获取实际的minBinId...');
+      
+      const getBinArraysProcess = spawn('npx', ['ts-node', 'getBinArrays.ts', '-pool', POOL_ADDRESS.toString()], {
+        cwd: __dirname,
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      getBinArraysProcess.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      
+      getBinArraysProcess.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+      
+      await new Promise<void>((resolve, reject) => {
+        getBinArraysProcess.on('close', (code: number) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`getBinArrays.ts 执行失败，退出码: ${code}, stderr: ${stderr}`));
+          }
+        });
+      });
+      
+      // 解析getBinArrays.ts的输出，查找minBinId
+      // 从输出中提取最小binId（支持负数）
+      const minBinMatch = stdout.match(/最小binId:\s*(-?\d+)/);
+      if (minBinMatch) {
+        actualMinBinId = parseInt(minBinMatch[1]);
+        console.log(`📋 从getBinArrays.ts获取的实际minBinId: ${actualMinBinId}`);
+      } else {
+        console.log('📋 未能从getBinArrays.ts输出中解析到minBinId');
+        console.log('调试信息 - 输出片段:', stdout.substring(0, 500));
+      }
+    } catch (e) {
+      console.log('📋 调用getBinArrays.ts失败，跳过minBinId比较检查:', e instanceof Error ? e.message : String(e));
+    }
+    
+    // 比较函数：检查计算出的minBinId是否满足条件
+    function validateMinBinId(calculatedMinBinId: number, mode: string): boolean {
+      if (actualMinBinId === null) {
+        console.log(`✅ ${mode}模式：未能获取到实际minBinId，跳过比较检查`);
+        return true;
+      }
+      
+      console.log(`🔍 ${mode}模式minBinId比较:`);
+      console.log(`- 计算出的minBinId: ${calculatedMinBinId}`);
+      console.log(`- 实际minBinId (来自getBinArrays.ts): ${actualMinBinId}`);
+      
+      if (actualMinBinId <= calculatedMinBinId) {
+        console.log(`✅ ${mode}模式：实际minBinId (${actualMinBinId}) <= 计算出的minBinId (${calculatedMinBinId})，条件满足`);
+        return true;
+      } else {
+        console.log(`❌ ${mode}模式：实际minBinId (${actualMinBinId}) > 计算出的minBinId (${calculatedMinBinId})，条件不满足`);
+        console.log(`🚫 退出addLiquidity.ts执行`);
+        return false;
+      }
+    }
 
     // 新模式：基于 last_updated_first（仅命令行输入），默认启用
     const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
@@ -602,6 +669,11 @@ async function main() {
       console.log(`- Min Bin ID: ${minBinId}`);
       console.log(`- Max Bin ID: ${maxBinId}`);
       console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+      
+      // 验证自动模式计算出的minBinId
+      if (!validateMinBinId(minBinId, '自动')) {
+        return; // 退出程序
+      }
     } 
     
     // 创建用户密钥对（仅支持加密私钥，解密后为Base58格式）
@@ -649,8 +721,8 @@ async function main() {
       const balanceSOL = balance / 1e9;
       console.log(`💰 钱包余额: ${balanceSOL.toFixed(6)} SOL (${balance} lamports)`);
       
-      if (balance < 60000000) { // 0.06 SOL
-        console.log('⚠️  余额不足！建议充值至少 0.06 SOL');
+      if (balance < 1100000000) { // 1.1 SOL
+        console.log('⚠️  余额不足！建议充值至少 1.1 SOL');
         console.log('需要支付：账户租金 + 交易费用');
       } else {
         console.log('✅ 余额充足，可以继续交易');
@@ -744,6 +816,11 @@ async function main() {
                   console.log(`- Min Bin ID: ${minBinId}`);
                   console.log(`- Max Bin ID: ${maxBinId}`);
                   console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+                  
+                  // 验证价格比较模式（自动分支）计算出的minBinId
+                  if (!validateMinBinId(minBinId, '价格比较-自动')) {
+                    return; // 退出程序
+                  }
                 } else {
                   console.log(`✅ 最新价格 > 收盘价，使用新的计算bin范围方式`);
                   // 使用新的计算bin范围方式
@@ -757,6 +834,11 @@ async function main() {
                   console.log(`- Min Bin ID: ${minBinId}`);
                   console.log(`- Max Bin ID: ${maxBinId}`);
                   console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+                  
+                  // 验证价格比较模式（新方式分支）计算出的minBinId
+                  if (!validateMinBinId(minBinId, '价格比较-新方式')) {
+                    return; // 退出程序
+                  }
                 }
               } else {
                 console.log('未获取到最新价格，停止执行');
@@ -796,6 +878,11 @@ async function main() {
       console.log(`- Min Bin ID: ${minBinId}`);
       console.log(`- Max Bin ID: ${maxBinId}`);
       console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
+      
+      // 验证last_updated_first模式计算出的minBinId
+      if (!validateMinBinId(minBinId, 'last_updated_first')) {
+        return; // 退出程序
+      }
     }
     
     // 验证activeId是否大于或等于maxBinId（在所有bin范围计算完成后）
