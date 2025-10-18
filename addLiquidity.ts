@@ -134,8 +134,8 @@ const TOKEN_Y_DECIMAL = 9;  //sol
  * @returns 左侧bins数量
  */
 function calculateDynamicLeftBins(bin_step: number): number {
-  // 目标值：0.4
-  const targetValue = 0.4;  //-60%
+  // 从环境变量获取目标值，默认为0.4
+  const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;  //-60%
   // 基础值：1 - bin_step/10000
   const baseValue = 1 - bin_step / 10000;
   
@@ -340,7 +340,7 @@ async function addLiquidityWithExtendedPosition(
   
   // 步骤2: 添加流动性到扩展仓位
   const strategy = {
-    strategyType: StrategyType.BidAsk,
+    strategyType: StrategyType.Spot,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -423,7 +423,7 @@ function calculateNewBinRange(
 }
 
 /**
- * 完整的BidAsk策略流程（支持大于70个bins）
+ * 完整的Spot策略流程（支持大于70个bins）
  * @param dlmmPool DLMM池实例
  * @param userKeypair 用户密钥对
  * @param tokenXAmount Token X 数量
@@ -432,7 +432,7 @@ function calculateNewBinRange(
  * @param maxBinId 最大bin ID
  * @param slippage 滑点百分比
  */
-async function completeBidAskStrategyFlow(
+async function completeSpotStrategyFlow(
   dlmmPool: any,
   userKeypair: Keypair,
   tokenXAmount: BN,
@@ -442,7 +442,7 @@ async function completeBidAskStrategyFlow(
   slippage: number = SLIPPAGE_FROM_ENV
 ): Promise<{ positionKeypair: Keypair; createTxHash: string; addLiquidityTxHash: string }> {
   
-  console.log('=== 开始完整的BidAsk策略流程 ===');
+  console.log('=== 开始完整的Spot策略流程 ===');
   
   // 步骤1: 创建扩展空仓位
   console.log('步骤1: 创建扩展空仓位');
@@ -469,10 +469,10 @@ async function completeBidAskStrategyFlow(
   await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
   console.log('✅ 创建交易已确认');
   
-  // 步骤3: 添加BidAsk策略流动性
-  console.log('步骤3: 添加BidAsk策略流动性');
+  // 步骤3: 添加Spot策略流动性
+  console.log('步骤3: 添加Spot策略流动性');
   const strategy = {
-    strategyType: StrategyType.BidAsk,
+    strategyType: StrategyType.Spot,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -520,7 +520,7 @@ async function completeBidAskStrategyFlow(
     throw new Error('添加流动性交易确认超时');
   }
   
-  console.log('=== BidAsk策略流程完成 ===');
+  console.log('=== Spot策略流程完成 ===');
   console.log('- 仓位地址:', positionKeypair.publicKey.toString());
   console.log('- 创建交易:', createTxHash);
   console.log('- 添加流动性交易:', addLiquidityTxHash);
@@ -623,11 +623,120 @@ async function main() {
       console.log('📋 调用getBinArrays.ts失败，跳过minBinId比较检查:', e instanceof Error ? e.message : String(e));
     }
     
+    // 移动失败文件到fail_minbinId目录的辅助函数
+    function moveFailedPoolFile(poolAddress: string): void {
+      try {
+        const sourceFile = path.resolve(__dirname, 'data', `${poolAddress}.json`);
+        const failDir = path.resolve(__dirname, 'data', 'fail_minbinId');
+        const targetFile = path.resolve(failDir, `${poolAddress}.json`);
+        
+        // 确保fail_minbinId目录存在
+        if (!fs.existsSync(failDir)) {
+          fs.mkdirSync(failDir, { recursive: true });
+          console.log(`📁 创建失败目录: ${failDir}`);
+        }
+        
+        // 检查源文件是否存在
+        if (fs.existsSync(sourceFile)) {
+          // 如果目标文件已存在，添加时间戳后缀
+          let finalTargetFile = targetFile;
+          if (fs.existsSync(targetFile)) {
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const ext = path.extname(targetFile);
+            const name = path.basename(targetFile, ext);
+            finalTargetFile = path.resolve(failDir, `${name}_${timestamp}${ext}`);
+          }
+          
+          // 移动文件
+          fs.renameSync(sourceFile, finalTargetFile);
+          console.log(`📦 已将失败文件移动到: ${finalTargetFile}`);
+        } else {
+          console.log(`⚠️ 源文件不存在，跳过移动: ${sourceFile}`);
+        }
+      } catch (error) {
+        console.log(`❌ 移动失败文件时出错:`, error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    // 并行重试函数：在后台重试addLiquidity.ts，不影响当前执行
+    function startParallelRetry(poolAddress: string, maxRetries: number = 5, waitTimeMs: number = 60000): void {
+      console.log(`🚀 启动并行重试机制: 最多重试${maxRetries}次，每次等待${waitTimeMs/1000}秒`);
+      
+      // 使用setImmediate确保不阻塞当前执行
+      setImmediate(async () => {
+        let allRetriesFailed = true;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            console.log(`⏳ 并行重试第${attempt}次，等待${waitTimeMs/1000}秒...`);
+            await new Promise(resolve => setTimeout(resolve, waitTimeMs));
+            
+            console.log(`🔄 执行并行重试第${attempt}次: npx ts-node addLiquidity.ts --pool=${poolAddress}`);
+            
+            const retryProcess = spawn('npx', ['ts-node', 'addLiquidity.ts', `--pool=${poolAddress}`], {
+              cwd: __dirname,
+              stdio: ['pipe', 'pipe', 'pipe']
+            });
+            
+            let retryStdout = '';
+            let retryStderr = '';
+            
+            retryProcess.stdout.on('data', (data: Buffer) => {
+              retryStdout += data.toString();
+            });
+            
+            retryProcess.stderr.on('data', (data: Buffer) => {
+              retryStderr += data.toString();
+            });
+            
+            await new Promise<void>((resolve, reject) => {
+              retryProcess.on('close', (code: number) => {
+                if (code === 0) {
+                  console.log(`✅ 并行重试第${attempt}次成功！`);
+                  console.log('重试输出:', retryStdout);
+                  allRetriesFailed = false; // 标记有成功
+                  resolve();
+                  return; // 成功则退出重试循环
+                } else {
+                  console.log(`❌ 并行重试第${attempt}次失败，退出码: ${code}`);
+                  if (retryStderr) {
+                    console.log('重试错误:', retryStderr);
+                  }
+                  if (attempt === maxRetries) {
+                    console.log(`🚫 并行重试已达到最大次数${maxRetries}，停止重试`);
+                    reject(new Error(`重试失败，已达到最大次数`));
+                  } else {
+                    resolve(); // 继续下一次重试
+                  }
+                }
+              });
+            });
+            
+            // 如果成功，退出重试循环
+            break;
+            
+          } catch (error) {
+            console.log(`❌ 并行重试第${attempt}次异常:`, error instanceof Error ? error.message : String(error));
+            if (attempt === maxRetries) {
+              console.log(`🚫 并行重试已达到最大次数${maxRetries}，停止重试`);
+              break;
+            }
+          }
+        }
+        
+        // 如果所有重试都失败了，移动文件到失败目录
+        if (allRetriesFailed) {
+          console.log(`💥 所有重试都失败，将移动pool文件到失败目录`);
+          moveFailedPoolFile(poolAddress);
+        }
+      });
+    }
+
     // 比较函数：检查计算出的minBinId是否满足条件
-    function validateMinBinId(calculatedMinBinId: number, mode: string): boolean {
+    function validateMinBinId(calculatedMinBinId: number, mode: string): { shouldContinue: boolean; shouldRetry: boolean } {
       if (actualMinBinId === null) {
         console.log(`✅ ${mode}模式：未能获取到实际minBinId，跳过比较检查`);
-        return true;
+        return { shouldContinue: true, shouldRetry: false };
       }
       
       console.log(`🔍 ${mode}模式minBinId比较:`);
@@ -636,11 +745,11 @@ async function main() {
       
       if (actualMinBinId <= calculatedMinBinId) {
         console.log(`✅ ${mode}模式：实际minBinId (${actualMinBinId}) <= 计算出的minBinId (${calculatedMinBinId})，条件满足`);
-        return true;
+        return { shouldContinue: true, shouldRetry: false };
       } else {
         console.log(`❌ ${mode}模式：实际minBinId (${actualMinBinId}) > 计算出的minBinId (${calculatedMinBinId})，条件不满足`);
-        console.log(`🚫 退出addLiquidity.ts执行`);
-        return false;
+        console.log(`🔄 将启动并行重试机制`);
+        return { shouldContinue: false, shouldRetry: true };
       }
     }
 
@@ -671,7 +780,11 @@ async function main() {
       console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
       
       // 验证自动模式计算出的minBinId
-      if (!validateMinBinId(minBinId, '自动')) {
+      const validationResult = validateMinBinId(minBinId, '自动');
+      if (!validationResult.shouldContinue) {
+        if (validationResult.shouldRetry) {
+          startParallelRetry(POOL_ADDRESS.toString());
+        }
         return; // 退出程序
       }
     } 
@@ -807,7 +920,7 @@ async function main() {
                   // 使用自动模式计算bin范围
                   const leftBins = calculateDynamicLeftBins(binStep);
                   minBinId = currentActiveId - leftBins;
-                  maxBinId = currentActiveId ;
+                  maxBinId = currentActiveId -1;
                   binRangeCalculated = true;
                   console.log(`🔢 自动模式Bin ID范围:`);
                   console.log(`- Active ID: ${currentActiveId}`);
@@ -818,7 +931,11 @@ async function main() {
                   console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
                   
                   // 验证价格比较模式（自动分支）计算出的minBinId
-                  if (!validateMinBinId(minBinId, '价格比较-自动')) {
+                  const validationResult = validateMinBinId(minBinId, '价格比较-自动');
+                  if (!validationResult.shouldContinue) {
+                    if (validationResult.shouldRetry) {
+                      startParallelRetry(POOL_ADDRESS.toString());
+                    }
                     return; // 退出程序
                   }
                 } else {
@@ -836,7 +953,11 @@ async function main() {
                   console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
                   
                   // 验证价格比较模式（新方式分支）计算出的minBinId
-                  if (!validateMinBinId(minBinId, '价格比较-新方式')) {
+                  const validationResult = validateMinBinId(minBinId, '价格比较-新方式');
+                  if (!validationResult.shouldContinue) {
+                    if (validationResult.shouldRetry) {
+                      startParallelRetry(POOL_ADDRESS.toString());
+                    }
                     return; // 退出程序
                   }
                 }
@@ -880,7 +1001,11 @@ async function main() {
       console.log(`- 总Bins数量: ${maxBinId - minBinId + 1}`);
       
       // 验证last_updated_first模式计算出的minBinId
-      if (!validateMinBinId(minBinId, 'last_updated_first')) {
+      const validationResult = validateMinBinId(minBinId, 'last_updated_first');
+      if (!validationResult.shouldContinue) {
+        if (validationResult.shouldRetry) {
+          startParallelRetry(POOL_ADDRESS.toString());
+        }
         return; // 退出程序
       }
     }
@@ -1027,7 +1152,7 @@ async function main() {
     // 使用addLiquidityByStrategy添加流动性
     try {
       const strategy = {
-        strategyType: StrategyType.BidAsk,
+        strategyType: StrategyType.Spot,
         minBinId: minBinId,
         maxBinId: maxBinId,
       };
@@ -1218,7 +1343,7 @@ async function closeEmptyPosition(
 export {
   createExtendedEmptyPosition,
   addLiquidityWithExtendedPosition,
-  completeBidAskStrategyFlow,
+  completeSpotStrategyFlow,
   closeEmptyPosition,
   main
 };

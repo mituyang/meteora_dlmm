@@ -367,7 +367,7 @@ async function claimAllRewardsByPosition() {
     console.log(`${xTokenName} 代币精度:`, tokenXDecimals);
     console.log('SOL 代币精度:', tokenYDecimals);
 
-    // ===== 止盈对比（提前进行）：累计已领取(USD) + 当前position(USD) 对比 1.05 SOL(USD) =====
+    // ===== 止盈对比（提前进行）：累计已领取(USD) + 当前position(USD) 对比 2.1 SOL(USD) =====
     try {
       const apiUrl = `https://dlmm-api.meteora.ag/position/${positionPubKey.toString()}`;
       const resp = await axios.get(apiUrl, { timeout: 10000 });
@@ -426,9 +426,11 @@ async function claimAllRewardsByPosition() {
           console.log(`💤 未领取费用USD价值: X=${pendingUsdX.toFixed(6)}, Y=${pendingUsdY.toFixed(6)}, sum=${pendingUsdSum.toFixed(6)}`);
           console.log(`💰 累计已领取USD + 当前positionUSD + 未领取费用USD: ${(sumUsd).toFixed(6)}`);
           console.log(`🪙 1 SOL 的USD价格: ${solUsdPrice}`);
-          const threshold = 1.05 * solUsdPrice;
+          console.log(`🪙 2 SOL 的USD价格: ${2 * solUsdPrice}`);
+          const threshold = 2.1 * solUsdPrice;
+          console.log('threshold为:', threshold);
           if (sumUsd >= threshold) {
-            console.log('✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ 1.05 SOL 的USD，触发移除流动性');
+            console.log('✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ 2.1 SOL 的USD，触发移除流动性');
             // 触发移除流动性，执行内部swap
             try {
               const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
@@ -442,7 +444,7 @@ async function claimAllRewardsByPosition() {
             // 直接返回，避免继续领取
             return;
           } else {
-            console.log('❌ (累计领取USD + 当前positionUSD) 未达到 1.05 SOL 的USD，继续流程');
+            console.log('❌ (累计领取USD + 当前positionUSD) 未达到 2.1 SOL 的USD，继续流程');
           }
         } else {
           console.log('⚠️ 本地价格缓存缺失(X或SOL)，跳过对比');
@@ -487,10 +489,10 @@ async function claimAllRewardsByPosition() {
     // 上方止盈判断处已输出“未领取费用USD价值”，此处不再重复打印
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
-    if (feeValue > 1) {
-      console.log(`✅ ${xTokenName}费用价值大于 1，继续领取...`);
+    if (feeValue > 2) {
+      console.log(`✅ ${xTokenName}费用价值大于 2，继续领取...`);
     } else {
-      console.log(`❌ ${xTokenName}费用价值小于等于 1，跳过领取`);
+      console.log(`❌ ${xTokenName}费用价值小于等于 2，跳过领取`);
       return;
     }
 

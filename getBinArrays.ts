@@ -196,37 +196,6 @@ async function processPool(connection: Connection, poolAddress: string) {
     if (analysisResult.isComplete || analysisResult.minToActiveComplete) {
       console.log(`\n[${poolAddress}] --- 执行额外保存操作 ---`);
       const extraSaveStart = Date.now();
-      
-      // 检查data/pool下是否存在对应的JSON文件
-      const poolFilePath = `data/pool/${poolAddress}.json`;
-      if (fs.existsSync(poolFilePath)) {
-        try {
-          // 读取pool文件内容
-          const poolData = fs.readFileSync(poolFilePath, 'utf8');
-          
-          // 保存到data/目录
-          const dataRootPath = `data/${poolAddress}.json`;
-          fs.writeFileSync(dataRootPath, poolData);
-          console.log(`✅ [${poolAddress}] 已保存到: ${dataRootPath}`);
-          
-          // 创建history目录
-          const historyDir = 'data/history/pool';
-          if (!fs.existsSync(historyDir)) {
-            fs.mkdirSync(historyDir, { recursive: true });
-          }
-          
-          // 移动到history目录
-          const historyPath = `${historyDir}/${poolAddress}.json`;
-          fs.renameSync(poolFilePath, historyPath);
-          console.log(`✅ [${poolAddress}] 已移动到: ${historyPath}`);
-          
-        } catch (error) {
-          console.error(`❌ [${poolAddress}] 额外保存操作失败:`, error);
-        }
-      } else {
-        console.log(`⚠️  [${poolAddress}] 未找到文件: ${poolFilePath}`);
-      }
-      
       extraSaveTime = Date.now() - extraSaveStart;
       console.log(`⏱️  [${poolAddress}] 额外保存操作耗时: ${extraSaveTime}ms`);
     }

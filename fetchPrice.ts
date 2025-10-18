@@ -62,8 +62,8 @@ interface PriceMonitorState {
   isMonitoring: boolean;
   startTime: number;
   lastCheckTime: number;
-  initialThreshold: number; // c * 0.4
-  targetThreshold: number;  // c * 0.4 * 1.2
+  initialThreshold: number; // c * targetValue (从环境变量获取)
+  targetThreshold: number;  // c * targetValue * 1.2 (从环境变量获取)
   poolAddress: string;
   positionAddress: string;
   c: number;
@@ -347,8 +347,10 @@ async function executeRemoveLiquidity(poolAddress: string, positionAddress: stri
  */
 function startPriceMonitoring(poolAddress: string, positionAddress: string, c: number): void {
   const now = Date.now();
-  const initialThreshold = c * 0.4;
-  const targetThreshold = c * 0.4 * 1.2;
+  // 从环境变量获取目标值，默认为0.4
+  const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
+  const initialThreshold = c * targetValue;
+  const targetThreshold = c * targetValue * 1.2;
   
   const monitorState: PriceMonitorState = {
     isMonitoring: true,
@@ -365,8 +367,8 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   savePriceMonitorStates(priceMonitorStates); // 保存到文件
   
   console.log(`🔍 开始监控池 ${poolAddress} 的价格变化`);
-  console.log(`   初始阈值 (c * 0.4): ${initialThreshold}`);
-  console.log(`   目标阈值 (c * 0.4 * 1.2): ${targetThreshold}`);
+  console.log(`   初始阈值 (c * ${targetValue}): ${initialThreshold}`);
+  console.log(`   目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
   console.log(`   监控开始时间: ${new Date(now).toLocaleString()}`);
 }
 
@@ -551,13 +553,15 @@ async function main() {
       const poolData = await readPoolDataFromJSON(poolAddress);
       if (poolData) {
         const currentPrice = parseFloat(latestPrice);
-        const initialThreshold = poolData.c * 0.4;
-        const targetThreshold = poolData.c * 0.4 * 1.2;
+        // 从环境变量获取目标值，默认为0.4
+        const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
+        const initialThreshold = poolData.c * targetValue;
+        const targetThreshold = poolData.c * targetValue * 1.2;
         
         console.log(`📊 价格比较:`);
         console.log(`  当前价格: ${currentPrice}`);
-        console.log(`  初始阈值 (c * 0.4): ${initialThreshold}`);
-        console.log(`  目标阈值 (c * 0.4 * 1.2): ${targetThreshold}`);
+        console.log(`  初始阈值 (c * ${targetValue}): ${initialThreshold}`);
+        console.log(`  目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
         console.log(`  c 值: ${poolData.c}`);
         
         // 检查是否已经在监控中
