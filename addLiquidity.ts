@@ -662,6 +662,10 @@ async function main() {
     function startParallelRetry(poolAddress: string, maxRetries: number = 5, waitTimeMs: number = 60000): void {
       console.log(`🚀 启动并行重试机制: 最多重试${maxRetries}次，每次等待${waitTimeMs/1000}秒`);
       
+      // 获取当前脚本的命令行参数，用于重试时传递
+      const tokenAddress = resolveTokenAddressFromArgs();
+      const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
+      
       // 使用setImmediate确保不阻塞当前执行
       setImmediate(async () => {
         let allRetriesFailed = true;
@@ -671,9 +675,19 @@ async function main() {
             console.log(`⏳ 并行重试第${attempt}次，等待${waitTimeMs/1000}秒...`);
             await new Promise(resolve => setTimeout(resolve, waitTimeMs));
             
-            console.log(`🔄 执行并行重试第${attempt}次: npx ts-node addLiquidity.ts --pool=${poolAddress}`);
+            // 构建重试命令参数
+            const retryArgs = ['ts-node', 'addLiquidity.ts', `--pool=${poolAddress}`];
+            if (tokenAddress) {
+              retryArgs.push(`--token=${tokenAddress}`);
+            }
+            if (lastUpdatedFirst) {
+              retryArgs.push(`--last_updated_first=${lastUpdatedFirst}`);
+            }
             
-            const retryProcess = spawn('npx', ['ts-node', 'addLiquidity.ts', `--pool=${poolAddress}`], {
+            const retryCommand = `npx ${retryArgs.join(' ')}`;
+            console.log(`🔄 执行并行重试第${attempt}次: ${retryCommand}`);
+            
+            const retryProcess = spawn('npx', retryArgs, {
               cwd: __dirname,
               stdio: ['pipe', 'pipe', 'pipe']
             });
