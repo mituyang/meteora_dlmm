@@ -643,7 +643,7 @@ async function completeSpotStrategyFlow(
 /**
  * 主函数 - 演示如何使用 createExtendedEmptyPosition 和 addLiquidityByStrategy
  */
-async function main() {
+async function main(retryCount: number = 0) {
   try {
     // 验证必需的环境变量
     const requiredEnvVars = [
@@ -1399,13 +1399,19 @@ async function main() {
           }
           
           // 等待区块链状态更新
-          console.log('⏳ 等待3秒让区块链状态更新...');
-          await new Promise(resolve => setTimeout(resolve, 3000));
-          console.log('✅ 等待完成，准备重新执行');
+          // console.log('⏳ 等待3秒让区块链状态更新...');
+          // await new Promise(resolve => setTimeout(resolve, 3000));
+          // console.log('✅ 等待完成，准备重新执行');
           
-          // 重新执行整个addLiquidity流程
-          console.log('🔄 重新执行addLiquidity.ts...');
-          await main();
+          // 重新执行整个addLiquidity流程（最多重试10次）
+          const maxRetries = 10;
+          if (retryCount < maxRetries) {
+            console.log(`🔄 重新执行addLiquidity.ts... (第 ${retryCount + 1}/${maxRetries} 次重试)`);
+            await main(retryCount + 1);
+          } else {
+            console.log(`❌ 已达到最大重试次数 (${maxRetries})，停止重试`);
+            throw new Error(`添加流动性失败，已重试 ${maxRetries} 次`);
+          }
           
         } catch (closeError) {
           console.error('❌ 关闭空仓位失败:', closeError instanceof Error ? closeError.message : String(closeError));
@@ -1480,5 +1486,5 @@ export {
 
 // 如果直接运行此文件，则执行main函数
 if (require.main === module) {
-  main();
+  main(0);
 }

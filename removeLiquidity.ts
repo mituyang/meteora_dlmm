@@ -7,6 +7,7 @@ import {
 } from '@solana/web3.js';
 import DLMM from '@meteora-ag/dlmm';
 import BN from 'bn.js';
+import axios from 'axios';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
 import CryptoJS from 'crypto-js';
@@ -161,6 +162,166 @@ function checkJupSwapSuccess(stdout: string, stderr: string): boolean {
 }
 
 /**
+ * 重试机制
+ */
+async function withRetry<T>(fn: () => Promise<T>, operation: string): Promise<T> {
+  const maxRetries = 3;
+  let lastError: Error | null = null;
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      console.log(`${operation} 第 ${i + 1} 次尝试失败:`, lastError.message);
+      
+      if (i < maxRetries - 1) {
+        const delay = Math.pow(2, i) * 1000; // 指数退避
+        console.log(`等待 ${delay}ms 后重试...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
+/**
+ * 检查代币余额 - 使用 OKX API
+ * @param tokenMint 代币合约地址
+ * @returns 代币余额
+ */
+async function checkTokenBalance(tokenMint: string): Promise<number> {
+  try {
+    const userWallet = process.env.USER_WALLET_ADDRESS;
+    if (!userWallet) {
+      console.error('缺少用户钱包地址：请在 .env 中设置 USER_WALLET_ADDRESS');
+      return 0;
+    }
+
+    const apiKey = process.env.OKX_API_KEY_XcqG;
+    const secretKey = process.env.OKX_SECRET_KEY_XcqG;
+    const passphrase = process.env.OKX_PASSPHRASE_XcqG;
+
+    if (!apiKey || !secretKey || !passphrase) {
+      console.error('缺少 OKX API 凭证：请在 .env 中设置 OKX_API_KEY_XcqG、OKX_SECRET_KEY_XcqG、OKX_PASSPHRASE_XcqG');
+      return 0;
+    }
+
+    const timestamp = new Date().toISOString();
+    const method = 'POST';
+    const requestPath = '/api/v6/dex/balance/token-balances-by-address';
+    const bodyArray = {
+      address: userWallet,
+      tokenContractAddresses: [
+        {
+          chainIndex: '501',
+          tokenContractAddress: tokenMint === 'So11111111111111111111111111111111111111112' ? '' : tokenMint
+        }
+      ]
+    };
+    const bodyString = JSON.stringify(bodyArray);
+
+    const prehash = `${timestamp}${method}${requestPath}${bodyString}`;
+    const signature = CryptoJS.enc.Base64.stringify(
+      CryptoJS.HmacSHA256(prehash, secretKey)
+    );
+
+    const url = `https://web3.okx.com${requestPath}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      'OK-ACCESS-KEY': apiKey,
+      'OK-ACCESS-PASSPHRASE': passphrase,
+      'OK-ACCESS-TIMESTAMP': timestamp,
+      'OK-ACCESS-SIGN': signature
+    } as const;
+
+    const resp = await withRetry(() => axios.post(url, bodyArray, { headers }), 'OKX 代币余额');
+    
+    if (!resp?.data) {
+      console.log('OKX 余额响应为空');
+      return 0;
+    }
+    
+    if (resp.data.code !== '0') {
+      console.log(`OKX 返回错误: code=${resp.data.code}, msg=${resp.data.msg || ''}`);
+      return 0;
+    }
+
+    const data = resp.data.data;
+    if (!Array.isArray(data) || data.length === 0) {
+      console.log('OKX 响应中未找到余额数据');
+      return 0;
+    }
+
+    const tokenAssets = data[0]?.tokenAssets;
+    if (!Array.isArray(tokenAssets) || tokenAssets.length === 0) {
+      console.log('OKX 响应中未找到代币资产');
+      return 0;
+    }
+
+    const tokenAsset = tokenAssets.find((asset: any) => {
+      // 如果是 SOL 主链币，匹配空字符串或 SOL 符号
+      if (tokenMint === 'So11111111111111111111111111111111111111112') {
+        return asset.tokenContractAddress === '' || asset.symbol === 'SOL';
+      }
+      // 其他代币按合约地址匹配
+      return asset.tokenContractAddress === tokenMint;
+    });
+
+    if (!tokenAsset) {
+      console.log(`未找到代币 ${tokenMint} 的余额信息`);
+      return 0;
+    }
+
+    const balance = parseFloat(tokenAsset.balance || '0');
+    console.log(`✅ OKX API 获取到代币 ${tokenMint} 余额: ${balance}`);
+    
+    return balance;
+  } catch (error) {
+    console.error('检查代币余额失败:', error);
+    return 0;
+  }
+}
+
+/**
+ * 智能等待代币到账并执行 jupSwap
+ * @param ca token合约地址
+ */
+async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
+  const maxWaitTime = 10000; // 最多等待10秒
+  const checkInterval = 1000; // 每1秒检查一次
+  const startTime = Date.now();
+  
+  console.log(`🔍 开始检查代币余额: ${ca}`);
+  
+  while (Date.now() - startTime < maxWaitTime) {
+    try {
+      // 检查代币余额
+      const balance = await checkTokenBalance(ca);
+      if (balance > 0) {
+        console.log(`✅ 检测到代币余额: ${balance}，立即执行 jupSwap`);
+        await executeJupSwap(ca);
+        return;
+      }
+      
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      console.log(`⏳ 代币余额为0，已等待 ${elapsed} 秒，继续检查...`);
+      
+      // 等待下次检查
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      
+    } catch (error) {
+      console.error('❌ 检查代币余额失败:', error instanceof Error ? error.message : String(error));
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+  }
+  
+  console.log(`⏰ 等待超时(10秒)，强制执行 jupSwap`);
+  await executeJupSwap(ca);
+}
+
+/**
  * 执行 jupSwap 命令
  * @param ca token合约地址
  * @returns 是否执行成功
@@ -312,24 +473,6 @@ function decryptPrivateKey(encryptedPrivateKey: string, password: string): strin
   }
 }
 
-// 通用重试：失败等1秒再试，最多2次（总尝试3次）
-async function withRetry<T>(fn: () => Promise<T>, desc: string): Promise<T> {
-  const maxAttempts = 3;
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (attempt < maxAttempts) {
-        console.log(`获取失败，1秒后重试(${attempt}/${maxAttempts - 1}) -> ${desc}:`, err instanceof Error ? err.message : String(err));
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
-}
-
 /**
  * 验证Solana地址格式
  * @param address 地址字符串
@@ -473,17 +616,8 @@ async function removeLiquidity() {
     } else {
       const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
       if (ca) {
-        console.log(`🔄 移除流动性成功，等待10秒后开始执行 jupSwap: ${ca}`);
-        console.log('⏳ 等待10秒让区块链状态更新...');
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        console.log('✅ 等待完成，开始执行 jupSwap');
-        const jupSwapSuccess = await executeJupSwap(ca);
-
-        if (jupSwapSuccess) {
-          console.log('🔄 jupSwap执行成功');
-        } else {
-          console.log('⚠️ jupSwap执行失败，仍将归档池配置JSON文件');
-        }
+        console.log(`🔄 移除流动性成功，开始智能等待代币到账并执行 jupSwap: ${ca}`);
+        await waitForTokenAndExecuteJupSwap(ca);
       } else {
         console.log('⚠️ 未找到 token 合约地址，跳过 jupSwap');
       }

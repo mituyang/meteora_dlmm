@@ -103,7 +103,7 @@ interface PriceMonitorState {
 }
 
 // 监控状态文件路径
-const PRICE_MONITOR_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data', '.priceMonitorStates.json');
+const PRICE_MONITOR_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data/states', '.priceMonitorStates.json');
 
 // 从文件加载监控状态
 function loadPriceMonitorStates(): Map<string, PriceMonitorState> {
@@ -144,7 +144,7 @@ interface ZeroXMonitorState {
   zeroSince: number | null;   // 开始为0的时间戳(ms)
 }
 
-const ZERO_X_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data', '.zeroXStates.json');
+const ZERO_X_STATES_FILE = path.join('/Users/yqw/meteora_dlmm/data/states', '.zeroXStates.json');
 
 // 从文件加载状态
 function loadZeroXStates(): Map<string, ZeroXMonitorState> {

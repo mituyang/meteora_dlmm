@@ -117,8 +117,8 @@ async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string
  * @param ca token合约地址
  */
 async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
-  const maxWaitTime = 30000; // 最多等待30秒
-  const checkInterval = 2000; // 每2秒检查一次
+  const maxWaitTime = 10000; // 最多等待10秒
+  const checkInterval = 1000; // 每1秒检查一次
   const startTime = Date.now();
   
   console.log(`🔍 开始检查代币余额: ${ca}`);
@@ -145,34 +145,102 @@ async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
     }
   }
   
-  console.log(`⏰ 等待超时(30秒)，强制执行 jupSwap`);
+  console.log(`⏰ 等待超时(10秒)，强制执行 jupSwap`);
   await executeJupSwap(ca);
 }
 
 /**
- * 检查代币余额
+ * 检查代币余额 - 使用 OKX API
  * @param tokenMint 代币合约地址
- * @returns 代币余额(最小单位)
+ * @returns 代币余额
  */
 async function checkTokenBalance(tokenMint: string): Promise<number> {
   try {
-    const userWallet = new PublicKey(process.env.USER_WALLET_ADDRESS!);
-    const mintPubKey = new PublicKey(tokenMint);
+    const userWallet = process.env.USER_WALLET_ADDRESS;
+    if (!userWallet) {
+      console.error('缺少用户钱包地址：请在 .env 中设置 USER_WALLET_ADDRESS');
+      return 0;
+    }
+
+    const apiKey = process.env.OKX_API_KEY_XcqG;
+    const secretKey = process.env.OKX_SECRET_KEY_XcqG;
+    const passphrase = process.env.OKX_PASSPHRASE_XcqG;
+
+    if (!apiKey || !secretKey || !passphrase) {
+      console.error('缺少 OKX API 凭证：请在 .env 中设置 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE');
+      return 0;
+    }
+
+    const timestamp = new Date().toISOString();
+    const method = 'POST';
+    const requestPath = '/api/v6/dex/balance/token-balances-by-address';
+    const bodyArray = {
+      address: userWallet,
+      tokenContractAddresses: [
+        {
+          chainIndex: '501',
+          tokenContractAddress: tokenMint === 'So11111111111111111111111111111111111111112' ? '' : tokenMint
+        }
+      ]
+    };
+    const bodyString = JSON.stringify(bodyArray);
+
+    const prehash = `${timestamp}${method}${requestPath}${bodyString}`;
+    const signature = CryptoJS.enc.Base64.stringify(
+      CryptoJS.HmacSHA256(prehash, secretKey)
+    );
+
+    const url = `https://web3.okx.com${requestPath}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      'OK-ACCESS-KEY': apiKey,
+      'OK-ACCESS-PASSPHRASE': passphrase,
+      'OK-ACCESS-TIMESTAMP': timestamp,
+      'OK-ACCESS-SIGN': signature
+    } as const;
+
+    const resp = await withRetry(() => axios.post(url, bodyArray, { headers }), 'OKX 代币余额');
     
-    // 获取代币账户
-    const tokenAccounts = await connection.getParsedTokenAccountsByOwner(userWallet, {
-      mint: mintPubKey
-    });
-    
-    if (tokenAccounts.value.length === 0) {
-      return 0; // 没有代币账户
+    if (!resp?.data) {
+      console.log('OKX 余额响应为空');
+      return 0;
     }
     
-    // 获取第一个代币账户的余额
-    const tokenAccount = tokenAccounts.value[0];
-    const balance = tokenAccount.account.data.parsed.info.tokenAmount.uiAmount;
+    if (resp.data.code !== '0') {
+      console.log(`OKX 返回错误: code=${resp.data.code}, msg=${resp.data.msg || ''}`);
+      return 0;
+    }
+
+    const data = resp.data.data;
+    if (!Array.isArray(data) || data.length === 0) {
+      console.log('OKX 响应中未找到余额数据');
+      return 0;
+    }
+
+    const tokenAssets = data[0]?.tokenAssets;
+    if (!Array.isArray(tokenAssets) || tokenAssets.length === 0) {
+      console.log('OKX 响应中未找到代币资产');
+      return 0;
+    }
+
+    const tokenAsset = tokenAssets.find((asset: any) => {
+      // 如果是 SOL 主链币，匹配空字符串或 SOL 符号
+      if (tokenMint === 'So11111111111111111111111111111111111111112') {
+        return asset.tokenContractAddress === '' || asset.symbol === 'SOL';
+      }
+      // 其他代币按合约地址匹配
+      return asset.tokenContractAddress === tokenMint;
+    });
+
+    if (!tokenAsset) {
+      console.log(`未找到代币 ${tokenMint} 的余额信息`);
+      return 0;
+    }
+
+    const balance = parseFloat(tokenAsset.balance || '0');
+    console.log(`✅ OKX API 获取到代币 ${tokenMint} 余额: ${balance}`);
     
-    return balance || 0;
+    return balance;
   } catch (error) {
     console.error('检查代币余额失败:', error);
     return 0;
@@ -187,7 +255,7 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 500000`;
+    const command = `./jupSwap -input ${ca} -maxfee 100000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
