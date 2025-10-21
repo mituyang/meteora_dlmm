@@ -63,8 +63,8 @@ func order(inputMint, outputMint, amount string) (string, string, error) {
 	}
 
 	// 打印状态码与响应体，确保数据100%真实
-	fmt.Printf("HTTP %d\n", resp.StatusCode)
-	fmt.Println(string(body))
+	getOrderLogger.Log("HTTP %d", resp.StatusCode)
+	getOrderLogger.Log("%s", string(body))
 
 	var parsed ultraOrderResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -76,7 +76,7 @@ func order(inputMint, outputMint, amount string) (string, string, error) {
 	maxFee := 50000 // 默认值
 	if maxFeeStr != "" {
 		if parsedMaxFee, err := fmt.Sscanf(maxFeeStr, "%d", &maxFee); err != nil || parsedMaxFee != 1 {
-			fmt.Printf("警告: MAX_PRIORITIZATION_FEE_LAMPORTS 解析失败，使用默认值 %d\n", maxFee)
+			getOrderLogger.Warn("MAX_PRIORITIZATION_FEE_LAMPORTS 解析失败，使用默认值 %d", maxFee)
 		}
 	}
 

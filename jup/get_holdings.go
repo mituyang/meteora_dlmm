@@ -94,14 +94,14 @@ func GetHoldingsWithPrint(shouldPrint bool) (*HoldingsResponse, error) {
 
 	// 解析并输出代币信息
 	if shouldPrint {
-		fmt.Printf("SOL余额: %s lamports (%.9f SOL)\n", holdings.Amount, holdings.UIAmount)
+		getHoldingsLogger.Log("SOL余额: %s lamports (%.9f SOL)", holdings.Amount, holdings.UIAmount)
 
 		if len(holdings.Tokens) > 0 {
-			fmt.Println("代币持仓:")
+			getHoldingsLogger.Log("代币持仓:")
 			for tokenMint, tokenAccounts := range holdings.Tokens {
 				for _, account := range tokenAccounts {
 					if account.UIAmount > 0 { // 只显示余额大于0的代币
-						fmt.Printf("代币: %s, 余额: %s (%.6f)\n", tokenMint, account.Amount, account.UIAmount)
+						getHoldingsLogger.Log("代币: %s, 余额: %s (%.6f)", tokenMint, account.Amount, account.UIAmount)
 					}
 				}
 			}

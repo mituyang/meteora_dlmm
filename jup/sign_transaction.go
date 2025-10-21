@@ -114,6 +114,6 @@ func sign_transaction(inputMint, outputMint, amount string) (string, string, err
 
 	// 5) 输出最终序列化后的交易
 	signedBase64 := base64.StdEncoding.EncodeToString(rawTx)
-	fmt.Printf("signedTransaction(base64)=%s\n", signedBase64)
+	signTransactionLogger.Log("signedTransaction(base64)=%s", signedBase64)
 	return signedBase64, requestId, nil
 }

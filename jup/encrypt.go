@@ -123,7 +123,7 @@ func EncryptPrivateKeyOnly(privateKey, password string) (string, error) {
 
 // 命令行工具函数
 func encryptPrivateKeyCLI() {
-	fmt.Println("=== PRIVATE_KEY 加密工具 ===")
+	encryptLogger.Log("=== PRIVATE_KEY 加密工具 ===")
 
 	// 获取私钥
 	var privateKey string
@@ -131,7 +131,7 @@ func encryptPrivateKeyCLI() {
 	fmt.Scanln(&privateKey)
 
 	if privateKey == "" {
-		fmt.Println("私钥不能为空")
+		encryptLogger.Error("私钥不能为空")
 		return
 	}
 
@@ -141,7 +141,7 @@ func encryptPrivateKeyCLI() {
 	fmt.Scanln(&password)
 
 	if password == "" {
-		fmt.Println("加密密码不能为空")
+		encryptLogger.Error("加密密码不能为空")
 		return
 	}
 
@@ -151,22 +151,22 @@ func encryptPrivateKeyCLI() {
 	fmt.Scanln(&confirmPassword)
 
 	if password != confirmPassword {
-		fmt.Println("两次输入的密码不一致")
+		encryptLogger.Error("两次输入的密码不一致")
 		return
 	}
 
 	// 仅加密私钥
 	encryptedPrivateKey, err := EncryptPrivateKeyOnly(privateKey, password)
 	if err != nil {
-		fmt.Printf("加密失败: %v\n", err)
+		encryptLogger.Error("加密失败: %v", err)
 		return
 	}
 
-	fmt.Println("\n=== 加密结果 ===")
-	fmt.Printf("加密后的私钥: %s\n", encryptedPrivateKey)
-	fmt.Printf("加密密钥: %s\n", password)
-	fmt.Println("\n请手动将以下内容添加到您的swap.env文件中:")
-	fmt.Printf("ENCRYPTED_PRIVATE_KEY=%s\n", encryptedPrivateKey)
-	fmt.Printf("ENCRYPTION_KEY=%s\n", password)
-	fmt.Println("\n注意：请妥善保管您的加密密钥，丢失后将无法恢复私钥")
+	encryptLogger.Log("\n=== 加密结果 ===")
+	encryptLogger.Log("加密后的私钥: %s", encryptedPrivateKey)
+	encryptLogger.Log("加密密钥: %s", password)
+	encryptLogger.Log("\n请手动将以下内容添加到您的swap.env文件中:")
+	encryptLogger.Log("ENCRYPTED_PRIVATE_KEY=%s", encryptedPrivateKey)
+	encryptLogger.Log("ENCRYPTION_KEY=%s", password)
+	encryptLogger.Log("\n注意：请妥善保管您的加密密钥，丢失后将无法恢复私钥")
 }
