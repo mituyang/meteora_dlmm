@@ -3,6 +3,39 @@ import DLMM, { getPriceOfBinByBinId } from '@meteora-ag/dlmm';
 import { Decimal } from 'decimal.js';
 import * as fs from 'fs';
 
+// 获取北京时间字符串，例如 2025-10-20 18:09:01
+function beijingNow(): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+// 全局日志前缀注入：[YYYY-MM-DD HH:mm:ss][getBinArrays]
+(function setupPrefixedLogger() {
+  const FILE_TAG = 'getBinArrays';
+  const prefix = () => `[${beijingNow()}][${FILE_TAG}]`;
+  const origLog = console.log.bind(console);
+  const origInfo = console.info.bind(console);
+  const origWarn = console.warn.bind(console);
+  const origError = console.error.bind(console);
+  const origDebug = (console as any).debug ? (console as any).debug.bind(console) : origLog;
+  console.log = (...args: any[]) => origLog(prefix(), ...args);
+  console.info = (...args: any[]) => origInfo(prefix(), ...args);
+  console.warn = (...args: any[]) => origWarn(prefix(), ...args);
+  console.error = (...args: any[]) => origError(prefix(), ...args);
+  // @ts-ignore 兼容环境无 debug 的情况
+  console.debug = (...args: any[]) => origDebug(prefix(), ...args);
+})();
+
 // 分析bin数据的函数
 function analyzeBinData(outputData: any): {isComplete: boolean, minToActiveComplete: boolean} {
   console.log('\n=== Bin数据分析 ===');
@@ -212,7 +245,7 @@ async function processPool(connection: Connection, poolAddress: string) {
     if (analysisResult.isComplete || analysisResult.minToActiveComplete) {
       console.log(`   - 额外保存操作: ${extraSaveTime}ms`);
     }
-    console.log(`   - 总耗时: ${totalTime}ms\n`);
+    console.log(`  - 总耗时: ${totalTime}ms\n`);
     
     return {
       poolAddress,

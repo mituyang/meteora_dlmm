@@ -21,6 +21,39 @@ const execAsync = promisify(exec);
 // 加载环境变量
 dotenv.config();
 
+// 获取北京时间字符串，例如 2025-10-20 18:09:01
+function beijingNow(): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+// 全局日志前缀注入：[YYYY-MM-DD HH:mm:ss][claimAllRewards]
+(function setupPrefixedLogger() {
+  const FILE_TAG = 'claimAllRewards';
+  const prefix = () => `[${beijingNow()}][${FILE_TAG}]`;
+  const origLog = console.log.bind(console);
+  const origInfo = console.info.bind(console);
+  const origWarn = console.warn.bind(console);
+  const origError = console.error.bind(console);
+  const origDebug = (console as any).debug ? (console as any).debug.bind(console) : origLog;
+  console.log = (...args: any[]) => origLog(prefix(), ...args);
+  console.info = (...args: any[]) => origInfo(prefix(), ...args);
+  console.warn = (...args: any[]) => origWarn(prefix(), ...args);
+  console.error = (...args: any[]) => origError(prefix(), ...args);
+  // @ts-ignore 兼容环境无 debug 的情况
+  console.debug = (...args: any[]) => origDebug(prefix(), ...args);
+})();
+
 /**
  * 获取 OKX DEX 最新价格（需要鉴权）
  * POST /api/v5/dex/market/price
@@ -154,7 +187,7 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 100000`;
+    const command = `./jupSwap -input ${ca} -maxfee 500000`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
@@ -489,10 +522,10 @@ async function claimAllRewardsByPosition() {
     // 上方止盈判断处已输出“未领取费用USD价值”，此处不再重复打印
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
-    if (feeValue > 2) {
-      console.log(`✅ ${xTokenName}费用价值大于 2，继续领取...`);
+    if (feeValue > 1.8) {
+      console.log(`✅ ${xTokenName}费用价值大于 1.8，继续领取...`);
     } else {
-      console.log(`❌ ${xTokenName}费用价值小于等于 2，跳过领取`);
+      console.log(`❌ ${xTokenName}费用价值小于等于 1.8，跳过领取`);
       return;
     }
 

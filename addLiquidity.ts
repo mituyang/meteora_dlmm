@@ -24,8 +24,119 @@ dotenv.config();
 const DEFAULT_SLIPPAGE = 0.1;
 const SLIPPAGE_FROM_ENV = process.env.SLIPPAGE_TOLERANCE ? parseFloat(process.env.SLIPPAGE_TOLERANCE) : DEFAULT_SLIPPAGE;
 
+// 从环境变量读取策略类型，默认为Spot
+const DEFAULT_STRATEGY = 'Spot';
+const STRATEGY_FROM_ENV = process.env.SPOT_STRATEGY || DEFAULT_STRATEGY;
+
+// 获取北京时间字符串，例如 2025-10-20 18:09:01
+function beijingNow(): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+// 全局日志前缀注入：[YYYY-MM-DD HH:mm:ss][addLiquidity]
+(function setupPrefixedLogger() {
+  const FILE_TAG = 'addLiquidity';
+  const prefix = () => `[${beijingNow()}][${FILE_TAG}]`;
+  const origLog = console.log.bind(console);
+  const origInfo = console.info.bind(console);
+  const origWarn = console.warn.bind(console);
+  const origError = console.error.bind(console);
+  const origDebug = (console as any).debug ? (console as any).debug.bind(console) : origLog;
+  console.log = (...args: any[]) => origLog(prefix(), ...args);
+  console.info = (...args: any[]) => origInfo(prefix(), ...args);
+  console.warn = (...args: any[]) => origWarn(prefix(), ...args);
+  console.error = (...args: any[]) => origError(prefix(), ...args);
+  // @ts-ignore 兼容环境无 debug 的情况
+  console.debug = (...args: any[]) => origDebug(prefix(), ...args);
+})();
+
 // 输出当前滑点设置
 console.log(`📊 滑点容忍度设置: ${SLIPPAGE_FROM_ENV}% ${process.env.SLIPPAGE_TOLERANCE ? '(来自环境变量)' : '(使用默认值)'}`);
+
+// 输出当前策略设置
+console.log(`📊 策略类型设置: ${STRATEGY_FROM_ENV} ${process.env.SPOT_STRATEGY ? '(来自环境变量)' : '(使用默认值)'}`);
+
+/**
+ * 从 data/{POOL_ADDRESS}.json 读取 base_fee_percentage_first
+ * @param poolAddress 池地址
+ * @returns base_fee_percentage_first 的值，如果读取失败返回 null
+ */
+function readBaseFeePercentageFirst(poolAddress: string): string | null {
+  try {
+    const poolFile = path.resolve(__dirname, 'data', `${poolAddress}.json`);
+    
+    if (!fs.existsSync(poolFile)) {
+      console.log(`JSON 文件不存在: ${poolFile}`);
+      return null;
+    }
+    
+    const jsonData = fs.readFileSync(poolFile, 'utf-8');
+    const data = JSON.parse(jsonData);
+    
+    // 优先从 data 字段读取 base_fee_percentage_first
+    let baseFeePercentageFirst = null;
+    if (data.data && data.data.base_fee_percentage_first !== undefined) {
+      baseFeePercentageFirst = data.data.base_fee_percentage_first;
+    }
+    
+    return baseFeePercentageFirst;
+  } catch (error) {
+    console.log(`读取 base_fee_percentage_first 失败:`, error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
+/**
+ * 将字符串策略类型转换为StrategyType枚举值
+ * @param strategyString 策略字符串
+ * @returns StrategyType枚举值
+ */
+function getStrategyType(strategyString: string): StrategyType {
+  switch (strategyString.toLowerCase()) {
+    case 'spot':
+      return StrategyType.Spot;
+    case 'curve':
+      return StrategyType.Curve;
+    case 'bid-ask':
+    case 'bidask':
+      return StrategyType.BidAsk;
+    default:
+      console.log(`⚠️ 未知的策略类型: ${strategyString}，使用默认值 Spot`);
+      return StrategyType.Spot;
+  }
+}
+
+/**
+ * 根据 base_fee_percentage_first 确定策略类型
+ * @param poolAddress 池地址
+ * @param defaultStrategy 默认策略类型
+ * @returns 策略类型字符串
+ */
+function determineStrategyType(poolAddress: string, defaultStrategy: string): string {
+  const baseFeePercentageFirst = readBaseFeePercentageFirst(poolAddress);
+  
+  if (baseFeePercentageFirst === "5") {
+    console.log(`📊 检测到 base_fee_percentage_first = 5，使用 BidAsk 策略`);
+    return "BidAsk";
+  } else {
+    console.log(`📊 base_fee_percentage_first = ${baseFeePercentageFirst}，使用默认策略: ${defaultStrategy}`);
+    return defaultStrategy;
+  }
+}
+
+// 获取策略类型（将在main函数中根据pool地址动态确定）
+let STRATEGY_TYPE: StrategyType;
 
 // 连接配置
 const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
@@ -340,7 +451,7 @@ async function addLiquidityWithExtendedPosition(
   
   // 步骤2: 添加流动性到扩展仓位
   const strategy = {
-    strategyType: StrategyType.Spot,
+    strategyType: STRATEGY_TYPE,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -423,7 +534,7 @@ function calculateNewBinRange(
 }
 
 /**
- * 完整的Spot策略流程（支持大于70个bins）
+ * 完整的策略流程（支持大于70个bins）
  * @param dlmmPool DLMM池实例
  * @param userKeypair 用户密钥对
  * @param tokenXAmount Token X 数量
@@ -442,7 +553,7 @@ async function completeSpotStrategyFlow(
   slippage: number = SLIPPAGE_FROM_ENV
 ): Promise<{ positionKeypair: Keypair; createTxHash: string; addLiquidityTxHash: string }> {
   
-  console.log('=== 开始完整的Spot策略流程 ===');
+  console.log(`=== 开始完整的${STRATEGY_FROM_ENV}策略流程 ===`);
   
   // 步骤1: 创建扩展空仓位
   console.log('步骤1: 创建扩展空仓位');
@@ -469,10 +580,10 @@ async function completeSpotStrategyFlow(
   await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
   console.log('✅ 创建交易已确认');
   
-  // 步骤3: 添加Spot策略流动性
-  console.log('步骤3: 添加Spot策略流动性');
+  // 步骤3: 添加策略流动性
+  console.log(`步骤3: 添加${STRATEGY_FROM_ENV}策略流动性`);
   const strategy = {
-    strategyType: StrategyType.Spot,
+    strategyType: STRATEGY_TYPE,
     minBinId: minBinId,
     maxBinId: maxBinId,
   };
@@ -520,7 +631,7 @@ async function completeSpotStrategyFlow(
     throw new Error('添加流动性交易确认超时');
   }
   
-  console.log('=== Spot策略流程完成 ===');
+  console.log(`=== ${STRATEGY_FROM_ENV}策略流程完成 ===`);
   console.log('- 仓位地址:', positionKeypair.publicKey.toString());
   console.log('- 创建交易:', createTxHash);
   console.log('- 添加流动性交易:', addLiquidityTxHash);
@@ -561,6 +672,11 @@ async function main() {
     }
     const POOL_ADDRESS = new PublicKey(poolAddressStr);
     console.log(`使用的POOL_ADDRESS: ${POOL_ADDRESS.toString()}${cliPoolAddress ? ' (来自命令行)' : ' (来自.env)'}`);
+    
+    // 根据 base_fee_percentage_first 确定策略类型
+    const determinedStrategy = determineStrategyType(POOL_ADDRESS.toString(), STRATEGY_FROM_ENV);
+    STRATEGY_TYPE = getStrategyType(determinedStrategy);
+    console.log(`📊 最终使用的策略类型: ${determinedStrategy}`);
     
     // 创建DLMM池实例（带重试）
     const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
@@ -1166,7 +1282,7 @@ async function main() {
     // 使用addLiquidityByStrategy添加流动性
     try {
       const strategy = {
-        strategyType: StrategyType.Spot,
+        strategyType: STRATEGY_TYPE,
         minBinId: minBinId,
         maxBinId: maxBinId,
       };

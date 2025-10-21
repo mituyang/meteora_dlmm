@@ -14,6 +14,39 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
+// 获取北京时间字符串，例如 2025-10-20 18:09:01
+function beijingNow(): string {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
+// 全局日志前缀注入：[YYYY-MM-DD HH:mm:ss][fetchPrice]
+(function setupPrefixedLogger() {
+  const FILE_TAG = 'fetchPrice';
+  const prefix = () => `[${beijingNow()}][${FILE_TAG}]`;
+  const origLog = console.log.bind(console);
+  const origInfo = console.info.bind(console);
+  const origWarn = console.warn.bind(console);
+  const origError = console.error.bind(console);
+  const origDebug = (console as any).debug ? (console as any).debug.bind(console) : origLog;
+  console.log = (...args: any[]) => origLog(prefix(), ...args);
+  console.info = (...args: any[]) => origInfo(prefix(), ...args);
+  console.warn = (...args: any[]) => origWarn(prefix(), ...args);
+  console.error = (...args: any[]) => origError(prefix(), ...args);
+  // @ts-ignore 兼容环境无 debug 的情况
+  console.debug = (...args: any[]) => origDebug(prefix(), ...args);
+})();
+
 // ===== 价格缓存（跨进程、基于文件）=====
 const PRICE_CACHE_DIR = '/Users/yqw/meteora_dlmm/data/prices';
 
@@ -349,7 +382,7 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   const now = Date.now();
   // 从环境变量获取目标值，默认为0.4
   const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
-  const initialThreshold = c * targetValue;
+  const initialThreshold = c * (targetValue + 0.01);
   const targetThreshold = c * targetValue * 1.2;
   
   const monitorState: PriceMonitorState = {
@@ -367,7 +400,7 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   savePriceMonitorStates(priceMonitorStates); // 保存到文件
   
   console.log(`🔍 开始监控池 ${poolAddress} 的价格变化`);
-  console.log(`   初始阈值 (c * ${targetValue}): ${initialThreshold}`);
+  console.log(`   初始阈值 (c * (${targetValue} + 0.01)): ${initialThreshold}`);
   console.log(`   目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
   console.log(`   监控开始时间: ${new Date(now).toLocaleString()}`);
 }
@@ -555,12 +588,12 @@ async function main() {
         const currentPrice = parseFloat(latestPrice);
         // 从环境变量获取目标值，默认为0.4
         const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
-        const initialThreshold = poolData.c * targetValue;
+        const initialThreshold = poolData.c * (targetValue + 0.01);
         const targetThreshold = poolData.c * targetValue * 1.2;
         
         console.log(`📊 价格比较:`);
         console.log(`  当前价格: ${currentPrice}`);
-        console.log(`  初始阈值 (c * ${targetValue}): ${initialThreshold}`);
+        console.log(`  初始阈值 (c * (${targetValue} + 0.01)): ${initialThreshold}`);
         console.log(`  目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
         console.log(`  c 值: ${poolData.c}`);
         

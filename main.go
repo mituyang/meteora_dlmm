@@ -57,7 +57,7 @@ func initLogging() error {
 func logOutput(format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	logMessage := fmt.Sprintf("[%s] %s", timestamp, message)
+	logMessage := fmt.Sprintf("[%s] [main.go] %s", timestamp, message)
 
 	// 输出到终端
 	fmt.Print(message)
@@ -525,7 +525,7 @@ func startGlobalClaimRewardsTicker() {
 	}
 }
 
-// executeGlobalClaimRewards 执行全局领取奖励
+// executeGlobalClaimRewards 执行全局领取奖励（并发执行，每个池间隔2秒）
 func executeGlobalClaimRewards() {
 	logOutput("🔄 开始全局领取奖励 - %s\n", time.Now().Format("15:04:05"))
 
@@ -537,7 +537,8 @@ func executeGlobalClaimRewards() {
 		return
 	}
 
-	poolCount := 0
+	// 收集所有有效的池地址
+	var validPools []string
 	for _, file := range files {
 		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
 			continue
@@ -552,10 +553,40 @@ func executeGlobalClaimRewards() {
 			continue
 		}
 
-		poolCount++
-		logOutput("🔄 正在领取奖励: %s\n", poolAddress)
-		runClaimRewards(poolAddress)
+		validPools = append(validPools, poolAddress)
 	}
+
+	poolCount := len(validPools)
+	if poolCount == 0 {
+		logOutput("⚠️ 没有找到有效的池，跳过本轮领取奖励\n")
+		return
+	}
+
+	logOutput("📊 找到 %d 个有效池，开始并发执行（间隔2秒）\n", poolCount)
+
+	// 使用 WaitGroup 等待所有 goroutine 完成
+	var wg sync.WaitGroup
+
+	// 为每个池启动一个 goroutine，间隔2秒
+	for i, poolAddress := range validPools {
+		wg.Add(1)
+		go func(index int, pool string) {
+			defer wg.Done()
+
+			// 计算延迟时间：每个池间隔2秒
+			delay := time.Duration(index) * 2 * time.Second
+			if delay > 0 {
+				logOutput("⏳ 池 %s 等待 %v 后开始执行\n", pool, delay)
+				time.Sleep(delay)
+			}
+
+			logOutput("🔄 正在领取奖励: %s (第 %d/%d 个池)\n", pool, index+1, poolCount)
+			runClaimRewards(pool)
+		}(i, poolAddress)
+	}
+
+	// 等待所有 goroutine 完成
+	wg.Wait()
 
 	logOutput("✅ 本轮全局领取奖励完成，处理了 %d 个池 - %s\n", poolCount, time.Now().Format("15:04:05"))
 }
