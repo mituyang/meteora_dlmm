@@ -1193,6 +1193,39 @@ func parseTokenAddressesFromOutput(output string, banList map[string]bool) []str
 	return tokenAddresses
 }
 
+// 读取中位数优先费用
+func readMedianPrioritizationFee() string {
+	swapFeePath := "/Users/yqw/meteora_dlmm/data/states/.swapFee.json"
+
+	// 检查文件是否存在
+	if _, err := os.Stat(swapFeePath); os.IsNotExist(err) {
+		logOutput("⚠️ 交换费用文件不存在: %s\n", swapFeePath)
+		return ""
+	}
+
+	// 读取文件内容
+	content, err := os.ReadFile(swapFeePath)
+	if err != nil {
+		logOutput("❌ 读取交换费用文件失败: %v\n", err)
+		return ""
+	}
+
+	// 解析JSON
+	var swapFeeData struct {
+		MedianPrioritizationFeeLamports int `json:"medianPrioritizationFeeLamports"`
+		Q1PrioritizationFeeLamports     int `json:"q1PrioritizationFeeLamports"`
+		Q3PrioritizationFeeLamports     int `json:"q3PrioritizationFeeLamports"`
+	}
+
+	if err := json.Unmarshal(content, &swapFeeData); err != nil {
+		logOutput("❌ 解析交换费用JSON失败: %v\n", err)
+		return ""
+	}
+
+	// 返回中位数费用作为字符串
+	return fmt.Sprintf("%d", swapFeeData.MedianPrioritizationFeeLamports)
+}
+
 // 执行单个token的jupSwap
 func executeJupSwapForToken(ca string) {
 	// 检查全局上下文是否已取消
@@ -1209,8 +1242,17 @@ func executeJupSwapForToken(ca string) {
 	ctx, cancel := context.WithTimeout(globalCtx, 30*time.Second)
 	defer cancel()
 
+	// 读取中位数优先费用
+	maxFee := readMedianPrioritizationFee()
+	if maxFee == "" {
+		maxFee = "500000" // 默认值
+		logOutput("⚠️ 无法读取中位数费用，使用默认值: %s\n", maxFee)
+	} else {
+		logOutput("💰 使用中位数优先费用: %s lamports\n", maxFee)
+	}
+
 	// 执行jupSwap命令
-	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", "500000")
+	cmd := exec.CommandContext(ctx, "./jupSwap", "-input", ca, "-maxfee", maxFee)
 	cmd.Dir = "/Users/yqw/meteora_dlmm"
 
 	// 执行命令并捕获输出

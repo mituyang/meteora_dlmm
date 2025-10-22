@@ -11,12 +11,35 @@ import axios from 'axios';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
 import CryptoJS from 'crypto-js';
-import fs from 'fs';
-import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const execAsync = promisify(exec);
+
+// 读取交换费用数据
+function readSwapFeeData(): { q1: number; q3: number } | null {
+  try {
+    const swapFeePath = path.join(__dirname, 'data', 'states', '.swapFee.json');
+    
+    if (!fs.existsSync(swapFeePath)) {
+      console.warn('⚠️ 交换费用文件不存在:', swapFeePath);
+      return null;
+    }
+
+    const content = fs.readFileSync(swapFeePath, 'utf8');
+    const data = JSON.parse(content);
+
+    return {
+      q1: data.q1PrioritizationFeeLamports || 0,
+      q3: data.q3PrioritizationFeeLamports || 0
+    };
+  } catch (error) {
+    console.error('❌ 读取交换费用数据失败:', error);
+    return null;
+  }
+}
 
 // 获取北京时间字符串，例如 2025-10-20 18:09:01
 function beijingNow(): string {
@@ -285,6 +308,39 @@ async function checkTokenBalance(tokenMint: string): Promise<number> {
 }
 
 /**
+ * 计算代币价值
+ * @param ca token合约地址
+ * @param balance 代币余额
+ * @returns 代币价值（USD）
+ */
+function calculateTokenValue(ca: string, balance: number): number {
+  try {
+    const priceFilePath = path.resolve(__dirname, 'data', 'prices', `${ca}.json`);
+    
+    if (!fs.existsSync(priceFilePath)) {
+      console.log(`⚠️ 价格文件不存在: ${priceFilePath}`);
+      return 0;
+    }
+    
+    const priceData = JSON.parse(fs.readFileSync(priceFilePath, 'utf8'));
+    const price = parseFloat(priceData.price);
+    
+    if (isNaN(price)) {
+      console.log(`⚠️ 无效的价格数据: ${priceData.price}`);
+      return 0;
+    }
+    
+    const value = balance * price;
+    console.log(`💰 代币价值计算: ${balance} * ${price} = ${value} USD`);
+    
+    return value;
+  } catch (error) {
+    console.error('❌ 计算代币价值失败:', error);
+    return 0;
+  }
+}
+
+/**
  * 智能等待代币到账并执行 jupSwap
  * @param ca token合约地址
  */
@@ -301,7 +357,31 @@ async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
       const balance = await checkTokenBalance(ca);
       if (balance > 0) {
         console.log(`✅ 检测到代币余额: ${balance}，立即执行 jupSwap`);
-        await executeJupSwap(ca);
+        
+        // 计算代币价值
+        const tokenValue = calculateTokenValue(ca, balance);
+        
+        // 根据代币价值设置maxfee
+        const feeData = readSwapFeeData();
+        let maxfee: number;
+        
+        if (tokenValue < 2) {
+          // 小于2美元：使用Q1费用，但上限为500000
+          const q1Fee = feeData?.q1 || 100000;
+          maxfee = Math.min(q1Fee, 500000);
+          console.log(`💸 代币价值: ${tokenValue} USD (< 2)，使用Q1费用: ${q1Fee}，实际maxfee: ${maxfee}`);
+        } else {
+          // 大于等于2美元：使用Q3费用
+          const q3Fee = feeData?.q3 || 500000;
+          maxfee = q3Fee;
+          console.log(`💸 代币价值: ${tokenValue} USD (>= 2)，使用Q3费用: ${q3Fee}，实际maxfee: ${maxfee}`);
+        }
+        
+        if (!feeData) {
+          console.warn('⚠️ 无法读取费用数据，使用默认值');
+        }
+        
+        await executeJupSwap(ca, maxfee);
         return;
       }
       
@@ -318,19 +398,20 @@ async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
   }
   
   console.log(`⏰ 等待超时(10秒)，强制执行 jupSwap`);
-  await executeJupSwap(ca);
+  await executeJupSwap(ca, 500000); // 超时时使用默认maxfee
 }
 
 /**
  * 执行 jupSwap 命令
  * @param ca token合约地址
+ * @param maxfee 最大手续费
  * @returns 是否执行成功
  */
-async function executeJupSwap(ca: string): Promise<boolean> {
+async function executeJupSwap(ca: string, maxfee: number = 500000): Promise<boolean> {
   try {
-    console.log(`🔄 开始执行 jupSwap: ${ca}`);
+    console.log(`🔄 开始执行 jupSwap: ${ca}, maxfee: ${maxfee}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 500000`;
+    const command = `./jupSwap -input ${ca} -maxfee ${maxfee}`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {

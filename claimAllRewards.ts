@@ -248,6 +248,39 @@ async function checkTokenBalance(tokenMint: string): Promise<number> {
 }
 
 /**
+ * 从 data/states/.swapFee.json 读取交换费用
+ * @returns q1PrioritizationFeeLamports 值，上限为 500000
+ */
+function getSwapFee(): number {
+  try {
+    const feeFilePath = path.resolve(__dirname, 'data', 'states', '.swapFee.json');
+    if (!fs.existsSync(feeFilePath)) {
+      console.log('⚠️ 交换费用文件不存在，使用默认值 100000');
+      return 100000;
+    }
+    
+    const raw = fs.readFileSync(feeFilePath, 'utf8');
+    const feeData = JSON.parse(raw);
+    const q1Fee = feeData?.q1PrioritizationFeeLamports;
+    
+    if (typeof q1Fee !== 'number') {
+      console.log('⚠️ 交换费用文件格式错误，使用默认值 100000');
+      return 100000;
+    }
+    
+    // 设置上限为 500000
+    const maxFee = Math.min(q1Fee, 500000);
+    console.log(`💰 从交换费用文件读取: q1PrioritizationFeeLamports=${q1Fee}, 实际使用maxfee=${maxFee}`);
+    
+    return maxFee;
+  } catch (error) {
+    console.error('❌ 读取交换费用文件失败:', error);
+    console.log('⚠️ 使用默认值 100000');
+    return 100000;
+  }
+}
+
+/**
  * 执行 jupSwap 命令
  * @param ca token合约地址
  */
@@ -255,7 +288,8 @@ async function executeJupSwap(ca: string): Promise<void> {
   try {
     console.log(`🔄 开始执行 jupSwap: ${ca}`);
     
-    const command = `./jupSwap -input ${ca} -maxfee 100000`;
+    const maxFee = getSwapFee();
+    const command = `./jupSwap -input ${ca} -maxfee ${maxFee}`;
     console.log(`执行命令: ${command}`);
     
     const { stdout, stderr } = await execAsync(command, {
