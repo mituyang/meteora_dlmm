@@ -218,8 +218,10 @@ func main() {
 			// 处理data目录中的新JSON文件（仅响应Create事件，带并发上限与去重）
 			if strings.HasPrefix(event.Name, dataDir) && strings.HasSuffix(event.Name, ".json") {
 				if event.Op&fsnotify.Create == fsnotify.Create {
-					// 去重：只处理一次
-					if _, loaded := processedFiles.LoadOrStore(event.Name, true); !loaded {
+					// 去重：基于文件路径+当前时间戳，确保删除后重新创建会再次处理
+					currentTime := time.Now().UnixNano()
+					fileKey := fmt.Sprintf("%s_%d", event.Name, currentTime)
+					if _, loaded := processedFiles.LoadOrStore(fileKey, true); !loaded {
 						logOutput("🆕 检测到JSON文件事件: %s, 操作: %v\n", event.Name, event.Op)
 						time.Sleep(100 * time.Millisecond) // 等待文件写入完成
 						// 占用并发令牌
