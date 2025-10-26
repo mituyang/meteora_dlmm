@@ -11,6 +11,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as https from 'https';
 
 const execAsync = promisify(exec);
 
@@ -96,7 +97,7 @@ interface PriceMonitorState {
   startTime: number;
   lastCheckTime: number;
   initialThreshold: number; // c * targetValue (从环境变量获取)
-  targetThreshold: number;  // c * targetValue * 1.2 (从环境变量获取)
+  targetThreshold: number;  // c * targetValue * 1.2 止损阈值：价格回升20%时止损移除流动性
   poolAddress: string;
   positionAddress: string;
   c: number;
@@ -231,9 +232,9 @@ async function checkZeroXAndMaybeRemove(poolAddress: string, positionAddress: st
       const mins = (now - st.zeroSince) / (1000 * 60);
       const consecutive = Math.floor(mins) + 1; // 连续第N分钟（首分钟记为1）
       console.log(`🧪 X为0，连续第${consecutive}分钟`);
-      if (mins >= 28) {
-        console.log('⛔ X为0已持续28分钟，执行移除流动性');
-        await executeRemoveLiquidity(poolAddress, positionAddress, 'X为0持续28分钟');
+      if (mins >= 29) {
+        console.log('⛔ X为0已持续29分钟，执行移除流动性');
+        await executeRemoveLiquidity(poolAddress, positionAddress, 'X为0持续29分钟');
         clearZeroXState(poolAddress);
       }
     }
@@ -383,7 +384,7 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   // 从环境变量获取目标值，默认为0.4
   const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
   const initialThreshold = c * (targetValue + 0.01);
-  const targetThreshold = c * targetValue * 1.2;
+  const targetThreshold = c * targetValue * 1.2; // 止损阈值：价格回升20%时止损移除流动性
   
   const monitorState: PriceMonitorState = {
     isMonitoring: true,
@@ -401,7 +402,7 @@ function startPriceMonitoring(poolAddress: string, positionAddress: string, c: n
   
   console.log(`🔍 开始监控池 ${poolAddress} 的价格变化`);
   console.log(`   初始阈值 (c * (${targetValue} + 0.01)): ${initialThreshold}`);
-  console.log(`   目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
+  console.log(`   止损阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
   console.log(`   监控开始时间: ${new Date(now).toLocaleString()}`);
 }
 
@@ -419,13 +420,13 @@ async function checkPriceMonitoring(poolAddress: string, currentPrice: number): 
   
   console.log(`📊 监控检查 - 池: ${poolAddress}`);
   console.log(`   当前价格: ${currentPrice}`);
-  console.log(`   目标阈值: ${monitorState.targetThreshold}`);
+  console.log(`   止损阈值: ${monitorState.targetThreshold}`);
   console.log(`   已监控时长: ${elapsedMinutes.toFixed(1)} 分钟`);
   
   // 检查是否达到目标阈值
   if (currentPrice >= monitorState.targetThreshold) {
-    console.log(`✅ 价格已回升至目标阈值，执行移除流动性`);
-    await executeRemoveLiquidity(poolAddress, monitorState.positionAddress, '价格回升至目标阈值');
+    console.log(`✅ 价格已回升至止损阈值，执行止损移除流动性`);
+    await executeRemoveLiquidity(poolAddress, monitorState.positionAddress, '价格回升至止损阈值');
     return true;
   }
   
@@ -480,9 +481,9 @@ function clearExpiredMonitorStates(): void {
 }
 
 /**
- * 获取 OKX DEX 最新价格（需要鉴权）
- * POST /api/v5/dex/market/price
- * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
+ * 获取 OKX DEX 最新价格（通过 K 线数据）
+ * GET /api/v6/dex/market/historical-candles
+ * 获取最新的 K 线数据，使用开盘价 o 作为价格
  */
 export async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
   // 先尝试读取同一分钟内的缓存
@@ -497,59 +498,72 @@ export async function fetchOkxLatestPrice(tokenContractAddress: string): Promise
     }
   }
 
-  const apiKey = process.env.OKX_API_KEY;
-  const secretKey = process.env.OKX_SECRET_KEY;
-  const passphrase = process.env.OKX_PASSPHRASE;
-
-  if (!apiKey || !secretKey || !passphrase) {
-    throw new Error('缺少 OKX API 凭证：请在 .env 中设置 OKX_API_KEY、OKX_SECRET_KEY、OKX_PASSPHRASE');
-  }
-
-  const timestamp = new Date().toISOString();
-  const method = 'POST';
-  const requestPath = '/api/v5/dex/market/price';
-  const bodyArray = [
-    {
-      chainIndex: '501',
-      tokenContractAddress
+  try {
+    const data = await fetchOkxCandles(tokenContractAddress);
+    
+    if (!data || !Array.isArray(data.data) || data.data.length === 0) {
+      console.log('OKX K线响应为空或无数据');
+      return undefined;
     }
-  ];
-  const bodyString = JSON.stringify(bodyArray);
 
-  const prehash = `${timestamp}${method}${requestPath}${bodyString}`;
-  const signature = CryptoJS.enc.Base64.stringify(
-    CryptoJS.HmacSHA256(prehash, secretKey)
-  );
+    // 获取最新的 K 线数据（数组第一个元素是最新的）
+    const latestCandle = data.data[0];
+    if (!latestCandle || !Array.isArray(latestCandle) || latestCandle.length < 2) {
+      console.log('OKX K线响应中未找到有效的K线数据，原始响应:', JSON.stringify(data));
+      return undefined;
+    }
 
-  const url = `https://web3.okx.com${requestPath}`;
-  const headers = {
-    'Content-Type': 'application/json',
-    'OK-ACCESS-KEY': apiKey,
-    'OK-ACCESS-PASSPHRASE': passphrase,
-    'OK-ACCESS-TIMESTAMP': timestamp,
-    'OK-ACCESS-SIGN': signature
-  } as const;
-
-  const resp = await withRetry(() => axios.post(url, bodyArray, { headers }), 'OKX 最新价格');
-  if (!resp?.data) {
-    console.log('OKX 价格响应为空');
+    // 根据文档，数组格式为：[ts,o,h,l,c,vol,volUsd,confirm]
+    // o 是开盘价，位于索引1
+    const priceStr = String(latestCandle[1]);
+    // 成功获取后写入缓存
+    writeCachedPrice(tokenContractAddress, priceStr);
+    return priceStr;
+  } catch (error) {
+    console.log('获取 OKX K线数据失败:', error);
     return undefined;
   }
-  if (resp.data.code !== '0') {
-    console.log(`OKX 返回错误: code=${resp.data.code}, msg=${resp.data.msg || ''}`);
-    return undefined;
-  }
-  const rows = Array.isArray(resp.data.data) ? resp.data.data : [];
-  const wantAddr = tokenContractAddress;
-  const entry = rows.find((r: any) => r?.chainIndex === '501' && String(r?.tokenContractAddress) === String(wantAddr)) || rows[0];
-  if (!entry?.price) {
-    console.log('OKX 响应中未找到价格字段，原始响应:', JSON.stringify(resp.data));
-    return undefined;
-  }
-  const priceStr = String(entry.price);
-  // 成功获取后写入缓存
-  writeCachedPrice(tokenContractAddress, priceStr);
-  return priceStr;
+}
+
+/**
+ * 从 OKX DEX 获取指定 token 的 1m K线数据
+ * 固定参数：chainIndex=501, bar=1m, limit=10
+ * 其余参数（after/before）保留为空
+ */
+async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<any> {
+  const baseUrl = 'https://web3.okx.com/api/v6/dex/market/historical-candles';
+  const params = new URLSearchParams();
+  params.set('chainIndex', '501');
+  params.set('tokenContractAddress', tokenContractAddress);
+  params.set('bar', '1m');
+  params.set('limit', '10');
+  if (after) params.set('after', after);
+  if (before) params.set('before', before);
+  const url = `${baseUrl}?${params.toString()}`;
+
+  const data = await new Promise<any>((resolve, reject) => {
+    https.get(url, (res) => {
+      const statusCode = res.statusCode || 0;
+      if (statusCode < 200 || statusCode >= 300) {
+        reject(new Error(`HTTP 状态码 ${statusCode}`));
+        res.resume();
+        return;
+      }
+      let raw = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { raw += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(raw);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error('响应解析失败'));
+        }
+      });
+    }).on('error', (e) => reject(e));
+  });
+
+  return data;
 }
 
 /**
@@ -589,12 +603,12 @@ async function main() {
         // 从环境变量获取目标值，默认为0.4
         const targetValue = process.env.TARGET_VALUE ? parseFloat(process.env.TARGET_VALUE) : 0.4;
         const initialThreshold = poolData.c * (targetValue + 0.01);
-        const targetThreshold = poolData.c * targetValue * 1.2;
+        const targetThreshold = poolData.c * targetValue * 1.2; // 止损阈值：价格回升20%时止损移除流动性
         
         console.log(`📊 价格比较:`);
         console.log(`  当前价格: ${currentPrice}`);
         console.log(`  初始阈值 (c * (${targetValue} + 0.01)): ${initialThreshold}`);
-        console.log(`  目标阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
+        console.log(`  止损阈值 (c * ${targetValue} * 1.2): ${targetThreshold}`);
         console.log(`  c 值: ${poolData.c}`);
         
         // 检查是否已经在监控中

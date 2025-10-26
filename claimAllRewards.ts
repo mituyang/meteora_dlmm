@@ -56,7 +56,7 @@ function beijingNow(): string {
 
 /**
  * 获取 OKX DEX 最新价格（需要鉴权）
- * POST /api/v5/dex/market/price
+ * POST /api/v6/dex/market/price
  * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
  */
 async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
@@ -70,7 +70,7 @@ async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string
 
   const timestamp = new Date().toISOString();
   const method = 'POST';
-  const requestPath = '/api/v5/dex/market/price';
+  const requestPath = '/api/v6/dex/market/price';
   const bodyArray = [
     {
       chainIndex: '501',
@@ -503,92 +503,120 @@ async function claimAllRewardsByPosition() {
     console.log('SOL 代币精度:', tokenYDecimals);
 
     // ===== 止盈对比（提前进行）：累计已领取(USD) + 当前position(USD) 对比 2.1 SOL(USD) =====
-    try {
-      const apiUrl = `https://dlmm-api.meteora.ag/position/${positionPubKey.toString()}`;
-      const resp = await axios.get(apiUrl, { timeout: 10000 });
-      const data = resp?.data;
-      if (data && typeof data.total_fee_usd_claimed === 'number' && typeof data.total_reward_usd_claimed === 'number') {
-        const totalUsd = Number(data.total_fee_usd_claimed) + Number(data.total_reward_usd_claimed);
-        console.log(`💵 累计已领取(USD): fee=${data.total_fee_usd_claimed}, reward=${data.total_reward_usd_claimed}, sum=${totalUsd}`);
+    let meteoraApiSuccess = false;
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (!meteoraApiSuccess && retryCount < maxRetries) {
+      try {
+        const apiUrl = `https://dlmm-api.meteora.ag/position/${positionPubKey.toString()}`;
+        console.log(`🔄 尝试调用 Meteora API (第${retryCount + 1}/${maxRetries}次): ${apiUrl}`);
+        const resp = await axios.get(apiUrl, { timeout: 3000 });
+        const data = resp?.data;
+        if (data && typeof data.total_fee_usd_claimed === 'number' && typeof data.total_reward_usd_claimed === 'number') {
+          const totalUsd = Number(data.total_fee_usd_claimed) + Number(data.total_reward_usd_claimed);
+          console.log(`💵 累计已领取(USD): fee=${data.total_fee_usd_claimed}, reward=${data.total_reward_usd_claimed}, sum=${totalUsd}`);
 
-        // 读取 position 的当前持仓 X/Y（最小单位），换算为实际数量
-        const currentX = getRawAmount(position.positionData.totalXAmount) / Math.pow(10, tokenXDecimals);
-        const currentY = getRawAmount(position.positionData.totalYAmount) / Math.pow(10, tokenYDecimals);
+          // 读取 position 的当前持仓 X/Y（最小单位），换算为实际数量
+          const currentX = getRawAmount(position.positionData.totalXAmount) / Math.pow(10, tokenXDecimals);
+          const currentY = getRawAmount(position.positionData.totalYAmount) / Math.pow(10, tokenYDecimals);
 
-        // 获取 X 与 SOL 的 USD 价格（优先使用 OKX API 实时获取）
-        // X 价格文件名为 ca（token 合约地址），来自 pool JSON；非 mint 地址
-        const caX = readTokenContractAddressFromPoolJson(poolAddress.toString());
-        const solMint = 'So11111111111111111111111111111111111111112';
-        
-        // 优先使用 OKX API 获取 X 代币价格，失败则回退到本地缓存
-        let xUsdPrice: number | undefined;
-        if (caX) {
-          try {
-            console.log('🔄 正在通过 OKX API 获取 X 代币最新价格...');
-            const xPriceStr = await fetchOkxLatestPrice(caX);
-            if (xPriceStr) {
-              xUsdPrice = Number(xPriceStr);
-              console.log(`✅ OKX API 获取 X 代币价格成功: ${xUsdPrice}`);
-            } else {
-              console.log('⚠️ OKX API 获取 X 代币价格失败，回退到本地缓存');
+          // 获取 X 与 SOL 的 USD 价格（优先使用 OKX API 实时获取）
+          // X 价格文件名为 ca（token 合约地址），来自 pool JSON；非 mint 地址
+          const caX = readTokenContractAddressFromPoolJson(poolAddress.toString());
+          const solMint = 'So11111111111111111111111111111111111111112';
+          
+          // 优先使用 OKX API 获取 X 代币价格，失败则回退到本地缓存
+          let xUsdPrice: number | undefined;
+          if (caX) {
+            try {
+              console.log('🔄 正在通过 OKX API 获取 X 代币最新价格...');
+              const xPriceStr = await fetchOkxLatestPrice(caX);
+              if (xPriceStr) {
+                xUsdPrice = Number(xPriceStr);
+                console.log(`✅ OKX API 获取 X 代币价格成功: ${xUsdPrice}`);
+              } else {
+                console.log('⚠️ OKX API 获取 X 代币价格失败，回退到本地缓存');
+                xUsdPrice = readUsdPriceFromCache(caX);
+              }
+            } catch (error) {
+              console.log('⚠️ OKX API 获取 X 代币价格异常，回退到本地缓存:', error instanceof Error ? error.message : String(error));
               xUsdPrice = readUsdPriceFromCache(caX);
             }
-          } catch (error) {
-            console.log('⚠️ OKX API 获取 X 代币价格异常，回退到本地缓存:', error instanceof Error ? error.message : String(error));
-            xUsdPrice = readUsdPriceFromCache(caX);
           }
-        }
-        
-        // SOL 价格通过 fetchPrice.ts 的方法实时获取（字符串转 number）
-        const solPriceStr = await fetchOkxLatestPriceFromModule(solMint);
-        const solUsdPrice = solPriceStr ? Number(solPriceStr) : undefined;
+          
+          // SOL 价格通过 fetchPrice.ts 的方法实时获取（字符串转 number）
+          const solPriceStr = await fetchOkxLatestPriceFromModule(solMint);
+          const solUsdPrice = solPriceStr ? Number(solPriceStr) : undefined;
 
-        if (xUsdPrice !== undefined && solUsdPrice !== undefined) {
-          const currentPositionUsd = currentX * xUsdPrice + currentY * solUsdPrice;
-          const baseSumUsd = totalUsd + currentPositionUsd;
-          // 计算未领取费用的USD价值（X费用 + SOL费用）
-          const pendingFeeX = position.positionData.feeX.toNumber() / Math.pow(10, tokenXDecimals);
-          const pendingFeeY = position.positionData.feeY.toNumber() / Math.pow(10, tokenYDecimals);
-          const pendingUsdX = pendingFeeX * xUsdPrice;
-          const pendingUsdY = pendingFeeY * solUsdPrice;
-          const pendingUsdSum = pendingUsdX + pendingUsdY;
-          const sumUsd = baseSumUsd + pendingUsdSum;
-          console.log('currentX为:', currentX);
-          console.log('currentY为:', currentY);
-          console.log('xUsdPrice为:', xUsdPrice);
-          console.log('solUsdPrice为:', solUsdPrice);
-          console.log(`💰 当前position价值(USD): X=${(currentX * xUsdPrice).toFixed(6)}, Y=${(currentY * solUsdPrice).toFixed(6)}, sum=${currentPositionUsd.toFixed(6)}`);
-          console.log(`💤 未领取费用USD价值: X=${pendingUsdX.toFixed(6)}, Y=${pendingUsdY.toFixed(6)}, sum=${pendingUsdSum.toFixed(6)}`);
-          console.log(`💰 累计已领取USD + 当前positionUSD + 未领取费用USD: ${(sumUsd).toFixed(6)}`);
-          console.log(`🪙 1 SOL 的USD价格: ${solUsdPrice}`);
-          console.log(`🪙 2 SOL 的USD价格: ${2 * solUsdPrice}`);
-          const threshold = 2.1 * solUsdPrice;
-          console.log('threshold为:', threshold);
-          if (sumUsd >= threshold) {
-            console.log('✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ 2.1 SOL 的USD，触发移除流动性');
-            // 触发移除流动性，执行内部swap
-            try {
-              const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
-              console.log(`🛠️ 触发移除流动性: ${cmd}`);
-              const { stdout, stderr } = await execAsync(cmd, { cwd: '/Users/yqw/meteora_dlmm' });
-              if (stdout) console.log(stdout);
-              if (stderr) console.error(stderr);
-            } catch (e) {
-              console.error('❌ 触发移除流动性失败:', e);
+          if (xUsdPrice !== undefined && solUsdPrice !== undefined) {
+            const currentPositionUsd = currentX * xUsdPrice + currentY * solUsdPrice;
+            const baseSumUsd = totalUsd + currentPositionUsd;
+            // 计算未领取费用的USD价值（X费用 + SOL费用）
+            const pendingFeeX = position.positionData.feeX.toNumber() / Math.pow(10, tokenXDecimals);
+            const pendingFeeY = position.positionData.feeY.toNumber() / Math.pow(10, tokenYDecimals);
+            const pendingUsdX = pendingFeeX * xUsdPrice;
+            const pendingUsdY = pendingFeeY * solUsdPrice;
+            const pendingUsdSum = pendingUsdX + pendingUsdY;
+            const sumUsd = baseSumUsd + pendingUsdSum;
+            console.log('currentX为:', currentX);
+            console.log('currentY为:', currentY);
+            console.log('xUsdPrice为:', xUsdPrice);
+            console.log('solUsdPrice为:', solUsdPrice);
+            console.log(`💰 当前position价值(USD): X=${(currentX * xUsdPrice).toFixed(6)}, Y=${(currentY * solUsdPrice).toFixed(6)}, sum=${currentPositionUsd.toFixed(6)}`);
+            console.log(`💤 未领取费用USD价值: X=${pendingUsdX.toFixed(6)}, Y=${pendingUsdY.toFixed(6)}, sum=${pendingUsdSum.toFixed(6)}`);
+            console.log(`💰 累计已领取USD + 当前positionUSD + 未领取费用USD: ${(sumUsd).toFixed(6)}`);
+            console.log(`🪙 1 SOL 的USD价格: ${solUsdPrice}`);
+            
+            // 从JSON文件读取solAmount，确保是number类型
+            const solAmountRaw = poolJson?.solAmount || poolJson?.data?.solAmount;
+            const solAmountFromJson = typeof solAmountRaw === 'number' ? solAmountRaw : parseFloat(solAmountRaw);
+            
+            if (isNaN(solAmountFromJson)) {
+              console.log('⚠️ JSON中的solAmount无效，跳过止盈判断');
+            } else {
+              const thresholdSol = solAmountFromJson * 1.05;
+              console.log(`📊 JSON中的solAmount: ${solAmountFromJson}`);
+              console.log(`🪙 ${thresholdSol.toFixed(2)} SOL 的USD价格: ${(thresholdSol * solUsdPrice).toFixed(6)}`);
+              const threshold = thresholdSol * solUsdPrice;
+              console.log('threshold为:', threshold);
+              if (sumUsd >= threshold) {
+                console.log(`✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ ${thresholdSol.toFixed(2)} SOL 的USD，触发移除流动性`);
+                // 触发移除流动性，执行内部swap
+                try {
+                  const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
+                  console.log(`🛠️ 触发移除流动性: ${cmd}`);
+                  const { stdout, stderr } = await execAsync(cmd, { cwd: '/Users/yqw/meteora_dlmm' });
+                  if (stdout) console.log(stdout);
+                  if (stderr) console.error(stderr);
+                } catch (e) {
+                  console.error('❌ 触发移除流动性失败:', e);
+                }
+                // 直接返回，避免继续领取
+                return;
+              } else {
+                console.log(`❌ (累计领取USD + 当前positionUSD) 未达到 ${thresholdSol.toFixed(2)} SOL 的USD，继续流程`);
+              }
             }
-            // 直接返回，避免继续领取
-            return;
           } else {
-            console.log('❌ (累计领取USD + 当前positionUSD) 未达到 2.1 SOL 的USD，继续流程');
+            console.log('⚠️ 本地价格缓存缺失(X或SOL)，跳过对比');
           }
+          meteoraApiSuccess = true; // 成功获取数据
         } else {
-          console.log('⚠️ 本地价格缓存缺失(X或SOL)，跳过对比');
+          console.log('⚠️ Meteora API 返回缺少累计领取USD字段');
+          meteoraApiSuccess = true; // 即使数据不完整，也算成功调用
         }
-      } else {
-        console.log('⚠️ Meteora API 返回缺少累计领取USD字段');
+      } catch (e) {
+        retryCount++;
+        if (retryCount < maxRetries) {
+          console.log(`⚠️ 调用 Meteora API 失败 (第${retryCount}/${maxRetries}次):`, e instanceof Error ? e.message : String(e));
+          console.log(`⏳ 等待1秒后重试...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } else {
+          console.log(`❌ 调用 Meteora API 获取累计领取USD失败 (已重试${maxRetries}次):`, e instanceof Error ? e.message : String(e));
+          console.log('🚨 严重警告：无法获取累计领取数据，可能错过止盈时机！');
+        }
       }
-    } catch (e) {
-      console.log('⚠️ 调用 Meteora API 获取累计领取USD失败:', e instanceof Error ? e.message : String(e));
     }
 
     // 获取可领取费用（原始值）
@@ -621,13 +649,24 @@ async function claimAllRewardsByPosition() {
     const feeValue = actualClaimableFeeX * latestXPrice;
     console.log(`${xTokenName}费用价值 (${xTokenName} * latestPrice):`, feeValue);
 
-    // 上方止盈判断处已输出“未领取费用USD价值”，此处不再重复打印
+    // 上方止盈判断处已输出"未领取费用USD价值"，此处不再重复打印
+    
+    // 从JSON文件读取solAmount作为领取阈值，确保是number类型
+    const solAmountFromJson = poolJson?.solAmount || poolJson?.data?.solAmount;
+    const solAmountThreshold = typeof solAmountFromJson === 'number' ? solAmountFromJson : parseFloat(solAmountFromJson);
+    
+    if (isNaN(solAmountThreshold)) {
+      console.log('⚠️ JSON中的solAmount无效，跳过领取');
+      return;
+    }
+    
+    console.log(`📊 领取阈值 (JSON中的solAmount): ${solAmountThreshold}`);
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
-    if (feeValue > 1.8) {
-      console.log(`✅ ${xTokenName}费用价值大于 1.8，继续领取...`);
+    if (feeValue > solAmountThreshold) {
+      console.log(`✅ ${xTokenName}费用价值大于 ${solAmountThreshold}，继续领取...`);
     } else {
-      console.log(`❌ ${xTokenName}费用价值小于等于 1.8，跳过领取`);
+      console.log(`❌ ${xTokenName}费用价值小于等于 ${solAmountThreshold}，跳过领取`);
       return;
     }
 

@@ -193,6 +193,59 @@ function resolveLastUpdatedFirstFromArgs(): string | undefined {
   return undefined;
 }
 
+// 从命令行读取 total_quote_liquidity_first
+function resolveTotalQuoteLiquidityFirstFromArgs(): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith('--total_quote_liquidity_first=')) {
+      return sanitizeString(arg.split('=')[1]);
+    }
+  }
+  return undefined;
+}
+
+// 根据 total_quote_liquidity_first 值计算 solAmount
+function calculateSolAmountFromTotalQuoteLiquidity(totalQuoteLiquidity: string): number {
+  const value = parseFloat(totalQuoteLiquidity);
+  if (isNaN(value)) {
+    console.log(`⚠️ total_quote_liquidity_first 值无效: ${totalQuoteLiquidity}，使用默认值 2`);
+    return 2;
+  }
+  
+  if (value < 60000) {
+    return 2;
+  } else if (value >= 60000 && value < 80000) {
+    return 3;
+  } else if (value >= 80000 && value < 100000) {
+    return 4;
+  } else {
+    return 5;
+  }
+}
+
+// 解析 solAmount（优先级：命令行 > .env > 默认为2）
+function resolveSolAmount(): number {
+  // 1. 优先从命令行 total_quote_liquidity_first 计算
+  const cliTotalQuoteLiquidity = resolveTotalQuoteLiquidityFirstFromArgs();
+  if (cliTotalQuoteLiquidity) {
+    const calculatedSolAmount = calculateSolAmountFromTotalQuoteLiquidity(cliTotalQuoteLiquidity);
+    console.log(`📊 SOL数量: ${calculatedSolAmount} (根据命令行 total_quote_liquidity_first=${cliTotalQuoteLiquidity} 计算)`);
+    return calculatedSolAmount;
+  }
+  
+  // 2. 其次从环境变量 SOL_AMOUNT 读取
+  if (process.env.SOL_AMOUNT) {
+    const envSolAmount = parseFloat(process.env.SOL_AMOUNT);
+    if (!isNaN(envSolAmount)) {
+      console.log(`📊 SOL数量: ${envSolAmount} (来自环境变量 SOL_AMOUNT)`);
+      return envSolAmount;
+    }
+  }
+  
+  // 3. 默认值为2
+  console.log(`📊 SOL数量: 2 (使用默认值)`);
+  return 2;
+}
+
 // 通用的引号处理函数：去掉包裹引号、处理%20/T分隔、去除转义符
 function sanitizeString(input: string): string {
   let s = input.trim();
@@ -324,7 +377,7 @@ async function createExtendedEmptyPosition(
  * 其余参数（after/before）保留为空
  */
 async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<any> {
-  const baseUrl = 'https://web3.okx.com/api/v5/dex/market/historical-candles';
+  const baseUrl = 'https://web3.okx.com/api/v6/dex/market/historical-candles';
   const params = new URLSearchParams();
   params.set('chainIndex', '501');
   params.set('tokenContractAddress', tokenContractAddress);
@@ -364,7 +417,7 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
 
 /**
  * 获取 OKX DEX 最新价格（需要鉴权）
- * POST /api/v5/dex/market/price
+ * POST /api/v6/dex/market/price
  * headers: OK-ACCESS-KEY, OK-ACCESS-PASSPHRASE, OK-ACCESS-TIMESTAMP, OK-ACCESS-SIGN
  */
 async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string | undefined> {
@@ -378,7 +431,7 @@ async function fetchOkxLatestPrice(tokenContractAddress: string): Promise<string
 
   const timestamp = new Date().toISOString();
   const method = 'POST';
-  const requestPath = '/api/v5/dex/market/price';
+  const requestPath = '/api/v6/dex/market/price';
   const bodyArray = [
     {
       chainIndex: '501',
@@ -649,8 +702,7 @@ async function main(retryCount: number = 0) {
     const requiredEnvVars = [
       'PRIVATE_KEY',
       'POOL_ADDRESS', 
-      'USER_WALLET_ADDRESS',
-      'SOL_AMOUNT'
+      'USER_WALLET_ADDRESS'
     ];
     
     for (const envVar of requiredEnvVars) {
@@ -684,8 +736,8 @@ async function main(retryCount: number = 0) {
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
     
-    // 从环境变量读取SOL数量
-    const solAmount = parseFloat(process.env.SOL_AMOUNT!);
+    // 解析SOL数量（优先级：命令行 > .env > 默认为2）
+    const solAmount = resolveSolAmount();
     const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
     // 计算Bin ID范围
@@ -964,8 +1016,14 @@ async function main(retryCount: number = 0) {
       const balanceSOL = balance / 1e9;
       console.log(`💰 钱包余额: ${balanceSOL.toFixed(6)} SOL (${balance} lamports)`);
       
-      if (balance < 1100000000) { // 1.1 SOL
-        console.log('⚠️  余额不足！建议充值至少 1.1 SOL');
+      // 计算最低余额要求：solAmount + 0.2 SOL
+      const minRequiredSOL = solAmount + 0.2;
+      const minRequiredLamports = minRequiredSOL * 1e9;
+      
+      console.log(`📊 最低余额要求: ${minRequiredSOL} SOL (${minRequiredLamports} lamports)`);
+      
+      if (balance < minRequiredLamports) {
+        console.log(`⚠️  余额不足！建议充值至少 ${minRequiredSOL} SOL`);
         console.log('需要支付：账户租金 + 交易费用');
       } else {
         console.log('✅ 余额充足，可以继续交易');
@@ -1253,7 +1311,7 @@ async function main(retryCount: number = 0) {
             throw new Error('创建交易确认超时');
           }
 
-          // 提前持久化 positionAddress（创建确认后、加流动性前）
+          // 提前持久化 positionAddress 和 solAmount（创建确认后、加流动性前）
           positionPubKey = positionKeypair.publicKey;
           createdNewPosition = true;
           try {
@@ -1264,13 +1322,15 @@ async function main(retryCount: number = 0) {
             } catch (e) { jsonW = {}; }
             const posAddr = positionPubKey.toString();
             jsonW.positionAddress = posAddr;
+            jsonW.solAmount = solAmount;
             if (jsonW.data && typeof jsonW.data === 'object') {
               jsonW.data.positionAddress = posAddr;
+              jsonW.data.solAmount = solAmount;
             }
             fs.writeFileSync(poolFile, JSON.stringify(jsonW, null, 2));
-            console.log(`已写入 positionAddress 到 ${poolFile}（创建确认后、加流动性前）`);
+            console.log(`已写入 positionAddress 和 solAmount 到 ${poolFile}（创建确认后、加流动性前）`);
           } catch (e: any) {
-            console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
+            console.log('写入 positionAddress 和 solAmount 到 JSON 失败:', e?.message || String(e));
           }
         }
       } finally {
@@ -1339,7 +1399,7 @@ async function main(retryCount: number = 0) {
       }
       console.log('添加流动性交易:', addLiquidityTxHash);
       
-      // 仅在创建新仓位时持久化 positionAddress
+      // 仅在创建新仓位时持久化 positionAddress 和 solAmount
       if (createdNewPosition) {
         try {
           let json: any = {};
@@ -1351,13 +1411,15 @@ async function main(retryCount: number = 0) {
           }
           const posAddr = positionPubKey!.toString();
           json.positionAddress = posAddr;
+          json.solAmount = solAmount;
           if (json.data && typeof json.data === 'object') {
             json.data.positionAddress = posAddr;
+            json.data.solAmount = solAmount;
           }
           fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
-          console.log(`已写入 positionAddress 到 ${poolFile}`);
+          console.log(`已写入 positionAddress 和 solAmount 到 ${poolFile}`);
         } catch (e: any) {
-          console.log('写入 positionAddress 到 JSON 失败:', e?.message || String(e));
+          console.log('写入 positionAddress 和 solAmount 到 JSON 失败:', e?.message || String(e));
         }
       }
       
@@ -1388,12 +1450,14 @@ async function main(retryCount: number = 0) {
             // 移除addLiquidity.ts添加的字段
             delete json.positionAddress;
             delete json.c;
+            delete json.solAmount;
             if (json.data && typeof json.data === 'object') {
               delete json.data.positionAddress;
               delete json.data.c;
+              delete json.data.solAmount;
             }
             fs.writeFileSync(poolFile, JSON.stringify(json, null, 2));
-            console.log('✅ 已清理JSON文件中的positionAddress和c字段，恢复到执行前状态');
+            console.log('✅ 已清理JSON文件中的positionAddress、c和solAmount字段，恢复到执行前状态');
           } catch (cleanupError) {
             console.log('⚠️ 清理JSON文件失败:', cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
           }

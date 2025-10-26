@@ -343,13 +343,31 @@ function calculateTokenValue(ca: string, balance: number): number {
 /**
  * 智能等待代币到账并执行 jupSwap
  * @param ca token合约地址
+ * @param poolAddress 池地址，用于读取solAmount
  */
-async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
+async function waitForTokenAndExecuteJupSwap(ca: string, poolAddress: string): Promise<void> {
   const maxWaitTime = 10000; // 最多等待10秒
   const checkInterval = 1000; // 每1秒检查一次
   const startTime = Date.now();
   
   console.log(`🔍 开始检查代币余额: ${ca}`);
+  
+  // 从JSON文件读取solAmount作为阈值，确保是number类型
+  let finalThreshold = 2; // 默认值
+  try {
+    const file = path.resolve(__dirname, 'data', `${poolAddress}.json`);
+    const raw = fs.readFileSync(file, 'utf8');
+    const poolJson = JSON.parse(raw);
+    const solAmountRaw = poolJson?.solAmount || poolJson?.data?.solAmount;
+    const solAmountThreshold = typeof solAmountRaw === 'number' ? solAmountRaw : parseFloat(solAmountRaw);
+    if (!isNaN(solAmountThreshold)) {
+      finalThreshold = solAmountThreshold;
+    }
+  } catch (error) {
+    console.log(`⚠️ 无法读取JSON文件中的solAmount，使用默认值: ${finalThreshold}`);
+  }
+  
+  console.log(`📊 费用判断阈值 (JSON中的solAmount): ${finalThreshold}`);
   
   while (Date.now() - startTime < maxWaitTime) {
     try {
@@ -365,16 +383,16 @@ async function waitForTokenAndExecuteJupSwap(ca: string): Promise<void> {
         const feeData = readSwapFeeData();
         let maxfee: number;
         
-        if (tokenValue < 2) {
-          // 小于2美元：使用Q1费用，但上限为500000
+        if (tokenValue < finalThreshold) {
+          // 小于阈值：使用Q1费用，但上限为500000
           const q1Fee = feeData?.q1 || 100000;
           maxfee = Math.min(q1Fee, 500000);
-          console.log(`💸 代币价值: ${tokenValue} USD (< 2)，使用Q1费用: ${q1Fee}，实际maxfee: ${maxfee}`);
+          console.log(`💸 代币价值: ${tokenValue} USD (< ${finalThreshold})，使用Q1费用: ${q1Fee}，实际maxfee: ${maxfee}`);
         } else {
-          // 大于等于2美元：使用Q3费用
+          // 大于等于阈值：使用Q3费用
           const q3Fee = feeData?.q3 || 500000;
           maxfee = q3Fee;
-          console.log(`💸 代币价值: ${tokenValue} USD (>= 2)，使用Q3费用: ${q3Fee}，实际maxfee: ${maxfee}`);
+          console.log(`💸 代币价值: ${tokenValue} USD (>= ${finalThreshold})，使用Q3费用: ${q3Fee}，实际maxfee: ${maxfee}`);
         }
         
         if (!feeData) {
@@ -698,7 +716,7 @@ async function removeLiquidity() {
       const ca = readTokenContractAddressFromPoolJson(finalPoolAddress);
       if (ca) {
         console.log(`🔄 移除流动性成功，开始智能等待代币到账并执行 jupSwap: ${ca}`);
-        await waitForTokenAndExecuteJupSwap(ca);
+        await waitForTokenAndExecuteJupSwap(ca, finalPoolAddress);
       } else {
         console.log('⚠️ 未找到 token 合约地址，跳过 jupSwap');
       }

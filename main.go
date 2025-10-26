@@ -408,7 +408,7 @@ func processNewJSONFile(jsonFilePath string) {
 	}
 
 	// 从Data中提取ca和last_updated_first
-	var ca, lastUpdatedFirst string
+	var ca, lastUpdatedFirst, total_quote_liquidity_first string
 	if caValue, exists := profitData.Data["ca"]; exists {
 		if caStr, ok := caValue.(string); ok {
 			ca = caStr
@@ -419,7 +419,11 @@ func processNewJSONFile(jsonFilePath string) {
 			lastUpdatedFirst = lastUpdatedFirstStr
 		}
 	}
-
+	if total_quote_liquidity_firstValue, exists := profitData.Data["total_quote_liquidity_first"]; exists {
+		if total_quote_liquidity_firstStr, ok := total_quote_liquidity_firstValue.(string); ok {
+			total_quote_liquidity_first = total_quote_liquidity_firstStr
+		}
+	}
 	// 不对 ca/last_updated_first 做强制校验：缺失则跳过对应参数
 
 	// 构建命令（按存在的字段拼接参数）
@@ -429,6 +433,9 @@ func processNewJSONFile(jsonFilePath string) {
 	}
 	if lastUpdatedFirst != "" {
 		args = append(args, fmt.Sprintf("--last_updated_first=%s", lastUpdatedFirst))
+	}
+	if total_quote_liquidity_first != "" {
+		args = append(args, fmt.Sprintf("--total_quote_liquidity_first=%s", total_quote_liquidity_first))
 	}
 	// 创建带超时的上下文（5分钟超时）
 	ctx, cancel := context.WithTimeout(globalCtx, 5*time.Minute)
