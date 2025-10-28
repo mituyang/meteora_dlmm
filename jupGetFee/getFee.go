@@ -104,17 +104,57 @@ var (
 	jsonMutex    sync.RWMutex
 	ticker       *time.Ticker
 	tickerMutex  sync.RWMutex
+	logFile      *os.File
+	logMutex     sync.Mutex
 )
+
+// logPrintf 同时输出到控制台和日志文件
+func logPrintf(format string, args ...interface{}) {
+	message := fmt.Sprintf(format, args...)
+
+	// 输出到控制台
+	fmt.Print(message)
+
+	// 输出到日志文件
+	if logFile != nil {
+		logMutex.Lock()
+		logFile.WriteString(message)
+		logMutex.Unlock()
+	}
+}
+
+// initLogFile 初始化日志文件
+func initLogFile() error {
+	// 确保目录存在
+	logDir := filepath.Join("..", "data", "log", "jupGetFee")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("创建日志目录失败: %v", err)
+	}
+
+	// 生成带时间戳的日志文件名
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	logPath := filepath.Join(logDir, fmt.Sprintf("jupGetFee_%s.log", timestamp))
+
+	// 创建新的日志文件
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("创建日志文件失败: %v", err)
+	}
+
+	logFile = file
+	logPrintf("日志文件已创建: %s\n", logPath)
+	return nil
+}
 
 // getPrioritizationFee 获取优先费用
 func getPrioritizationFee() (int, error) {
 	// API参数
 	baseURL := "https://lite-api.jup.ag/ultra/v1/order"
 	inputMint := "So11111111111111111111111111111111111111112"
-	outputMint := "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-	amount := "1000000000"
+	outputMint := "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+	amount := "100000000"
 	excludeRouters := "jupiterz"
-	taker := "F7vnfsoWYR3XQdPcDtRfLQv9KmQvsgXsV3xfRSHCRHT7"
+	taker := "FATnbSctYX3UjG4Cy9HxxGXUCCXGFvVe3WPAn3vQKw6E"
 
 	// 构建URL
 	u, err := url.Parse(baseURL)
@@ -276,7 +316,7 @@ func startTicker() {
 	}
 
 	ticker = time.NewTicker(10 * time.Second)
-	fmt.Printf("[%s] 启动定时器，每10秒获取一次API\n", time.Now().Format("15:04:05"))
+	logPrintf("[%s] 启动定时器，每10秒获取一次API\n", time.Now().Format("15:04:05"))
 
 	go func() {
 		for range ticker.C {
@@ -287,7 +327,7 @@ func startTicker() {
 	}()
 }
 
-// stopTicker 停止定时器
+// stopTicker 停止定时器并清空数据
 func stopTicker() {
 	tickerMutex.Lock()
 	defer tickerMutex.Unlock()
@@ -295,7 +335,13 @@ func stopTicker() {
 	if ticker != nil {
 		ticker.Stop()
 		ticker = nil
-		fmt.Printf("[%s] 停止定时器\n", time.Now().Format("15:04:05"))
+		logPrintf("[%s] 停止定时器\n", time.Now().Format("15:04:05"))
+
+		// 清空之前收集的数据
+		dataMutex.Lock()
+		feeDataList = []FeeData{}
+		dataMutex.Unlock()
+		logPrintf("[%s] 已清空历史数据，下次启动将使用全新数据\n", time.Now().Format("15:04:05"))
 	}
 }
 
@@ -310,10 +356,10 @@ func updateJsonFilesStatus() {
 	// 如果状态发生变化，启动或停止定时器
 	if oldStatus != hasJson {
 		if hasJson {
-			fmt.Printf("[%s] 检测到JSON文件，启动定时器\n", time.Now().Format("15:04:05"))
+			logPrintf("[%s] 检测到JSON文件，启动定时器\n", time.Now().Format("15:04:05"))
 			startTicker()
 		} else {
-			fmt.Printf("[%s] JSON文件消失，停止定时器\n", time.Now().Format("15:04:05"))
+			logPrintf("[%s] JSON文件消失，停止定时器\n", time.Now().Format("15:04:05"))
 			stopTicker()
 		}
 	}
@@ -341,7 +387,7 @@ func startFileWatcher() (*fsnotify.Watcher, error) {
 		return nil, fmt.Errorf("添加监听目录失败 %s: %v", dataDir, err)
 	}
 
-	fmt.Printf("开始监听目录: %s\n", dataDir)
+	logPrintf("开始监听目录: %s\n", dataDir)
 
 	// 启动监听协程
 	go func() {
@@ -357,7 +403,7 @@ func startFileWatcher() (*fsnotify.Watcher, error) {
 				// 只处理data目录下的JSON文件事件（不包括子目录）
 				if strings.HasSuffix(strings.ToLower(event.Name), ".json") &&
 					filepath.Dir(event.Name) == dataDir {
-					fmt.Printf("[%s] 检测到JSON文件变化: %s %s\n",
+					logPrintf("[%s] 检测到JSON文件变化: %s %s\n",
 						time.Now().Format("15:04:05"), event.Op.String(), event.Name)
 
 					// 更新JSON文件状态（会自动启动或停止定时器）
@@ -368,7 +414,7 @@ func startFileWatcher() (*fsnotify.Watcher, error) {
 				if !ok {
 					return
 				}
-				fmt.Printf("[%s] 文件监听错误: %v\n", time.Now().Format("15:04:05"), err)
+				logPrintf("[%s] 文件监听错误: %v\n", time.Now().Format("15:04:05"), err)
 			}
 		}
 	}()
@@ -394,12 +440,23 @@ func cleanupOldData() {
 }
 
 func main() {
-	fmt.Println("开始事务级别监控PrioritizationFeeLamports...")
-	fmt.Println("使用文件系统监听，实时检测data目录下JSON文件变化")
-	fmt.Println("只监听data目录本身，不包括子文件夹（如data/log、data/binArrays等）")
-	fmt.Println("当检测到JSON文件时，启动定时器每10秒获取一次API")
-	fmt.Println("当JSON文件消失时，停止定时器但继续监听")
-	fmt.Println("按Ctrl+C停止程序")
+	// 初始化日志文件
+	if err := initLogFile(); err != nil {
+		fmt.Printf("初始化日志文件失败: %v\n", err)
+		return
+	}
+	defer func() {
+		if logFile != nil {
+			logFile.Close()
+		}
+	}()
+
+	logPrintf("开始事务级别监控PrioritizationFeeLamports...\n")
+	logPrintf("使用文件系统监听，实时检测data目录下JSON文件变化\n")
+	logPrintf("只监听data目录本身，不包括子文件夹（如data/log、data/binArrays等）\n")
+	logPrintf("当检测到JSON文件时，启动定时器每10秒获取一次API\n")
+	logPrintf("当JSON文件消失时，停止定时器但继续监听\n")
+	logPrintf("按Ctrl+C停止程序\n")
 
 	// 初始化HTTP客户端（复用连接）
 	httpClient = &http.Client{
@@ -415,7 +472,7 @@ func main() {
 	// 启动文件系统监听
 	watcher, err := startFileWatcher()
 	if err != nil {
-		fmt.Printf("启动文件监听失败: %v\n", err)
+		logPrintf("启动文件监听失败: %v\n", err)
 		return
 	}
 	defer watcher.Close()
@@ -424,9 +481,9 @@ func main() {
 	updateJsonFilesStatus()
 
 	if getJsonFilesStatus() {
-		fmt.Printf("[%s] 初始状态：检测到JSON文件，定时器已启动\n", time.Now().Format("15:04:05"))
+		logPrintf("[%s] 初始状态：检测到JSON文件，定时器已启动\n", time.Now().Format("15:04:05"))
 	} else {
-		fmt.Printf("[%s] 初始状态：data文件夹下没有JSON文件，等待文件变化...\n", time.Now().Format("15:04:05"))
+		logPrintf("[%s] 初始状态：data文件夹下没有JSON文件，等待文件变化...\n", time.Now().Format("15:04:05"))
 	}
 
 	// 保持程序运行
@@ -435,17 +492,25 @@ func main() {
 
 // runOnce 执行一次获取和保存操作
 func runOnce() {
-	fmt.Printf("[%s] 开始请求API...\n", time.Now().Format("15:04:05"))
+	logPrintf("[%s] 开始请求API...\n", time.Now().Format("15:04:05"))
 
 	// 获取优先费用
 	fee, err := getPrioritizationFee()
 	if err != nil {
-		fmt.Printf("[%s] 获取费用失败: %v\n", time.Now().Format("15:04:05"), err)
+		logPrintf("[%s] 获取费用失败: %v\n", time.Now().Format("15:04:05"), err)
+		// API失败时，直接保存默认值
+		q1, q2, q3 := 5000000, 10000000, 50000000
+		if err := saveQuartilesToFile(q1, q2, q3); err != nil {
+			logPrintf("[%s] 保存默认值失败: %v\n", time.Now().Format("15:04:05"), err)
+		} else {
+			logPrintf("[%s] API失败，已保存默认值: Q1=%d, Q2=%d, Q3=%d\n",
+				time.Now().Format("15:04:05"), q1, q2, q3)
+		}
 		return
 	}
 
 	// 实时输出
-	fmt.Printf("[%s] Prioritization Fee Lamports: %d\n", time.Now().Format("15:04:05"), fee)
+	logPrintf("[%s] Prioritization Fee Lamports: %d\n", time.Now().Format("15:04:05"), fee)
 
 	// 添加到数据列表（线程安全）
 	dataMutex.Lock()
@@ -468,11 +533,22 @@ func runOnce() {
 
 	q1, q2, q3 := calculateQuartiles(fees)
 
+	// 设置最小值：如果为0，则设置默认值
+	if q1 == 0 {
+		q1 = 5000000
+	}
+	if q2 == 0 {
+		q2 = 10000000
+	}
+	if q3 == 0 {
+		q3 = 50000000
+	}
+
 	// 保存三分位数据到文件
 	if err := saveQuartilesToFile(q1, q2, q3); err != nil {
-		fmt.Printf("[%s] 保存文件失败: %v\n", time.Now().Format("15:04:05"), err)
+		logPrintf("[%s] 保存文件失败: %v\n", time.Now().Format("15:04:05"), err)
 	} else {
-		fmt.Printf("[%s] 三分位数据已保存: Q1=%d, Q2=%d, Q3=%d (基于最近%d个数据点)\n",
+		logPrintf("[%s] 三分位数据已保存: Q1=%d, Q2=%d, Q3=%d (基于最近%d个数据点)\n",
 			time.Now().Format("15:04:05"), q1, q2, q3, len(fees))
 	}
 }
