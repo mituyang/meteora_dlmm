@@ -737,8 +737,8 @@ async function main(retryCount: number = 0) {
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
     
     // 解析SOL数量（优先级：命令行 > .env > 默认为2）
-    const solAmount = resolveSolAmount();
-    const tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
+    let solAmount = resolveSolAmount();
+    let tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL); // SOL数量乘以精度
     
     // 计算Bin ID范围
     let minBinId: number = 0;
@@ -1017,14 +1017,53 @@ async function main(retryCount: number = 0) {
       console.log(`💰 钱包余额: ${balanceSOL.toFixed(6)} SOL (${balance} lamports)`);
       
       // 计算最低余额要求：solAmount + 0.2 SOL
-      const minRequiredSOL = solAmount + 0.2;
-      const minRequiredLamports = minRequiredSOL * 1e9;
+      let minRequiredSOL = solAmount + 0.2;
+      let minRequiredLamports = minRequiredSOL * 1e9;
       
-      console.log(`📊 最低余额要求: ${minRequiredSOL} SOL (${minRequiredLamports} lamports)`);
+      console.log(`📊 初始 solAmount: ${solAmount} SOL`);
+      console.log(`📊 初始最低余额要求: ${minRequiredSOL} SOL (${minRequiredLamports} lamports)`);
       
       if (balance < minRequiredLamports) {
-        console.log(`⚠️  余额不足！建议充值至少 ${minRequiredSOL} SOL`);
-        console.log('需要支付：账户租金 + 交易费用');
+        console.log(`⚠️  余额不足！开始自动调整 solAmount...`);
+        
+        // 计算需要减少的 0.5 的倍数 n
+        // 约束：1.2 <= (solAmount - 0.5 * n + 0.2) <= balanceSOL
+        // 即：1.0 <= (solAmount - 0.5 * n) <= balanceSOL - 0.2
+        
+        const maxAdjustedSolAmount = balanceSOL - 0.2; // 调整后的最大 solAmount
+        const minAdjustedSolAmount = 1.0; // 调整后的最小 solAmount（确保以0.5递减且 solAmount + 0.2 >= 1.2）
+        
+        if (maxAdjustedSolAmount < minAdjustedSolAmount) {
+          console.log(`❌ 余额过低！至少需要 ${minAdjustedSolAmount + 0.2} SOL，当前仅有 ${balanceSOL.toFixed(6)} SOL`);
+          console.log(`建议充值至少 ${(minAdjustedSolAmount + 0.2).toFixed(1)} SOL`);
+        } else {
+          // 计算需要减少多少（以 0.5 为单位）
+          const reductionNeeded = solAmount - maxAdjustedSolAmount;
+          const n = Math.ceil(reductionNeeded / 0.5);
+          
+          const originalSolAmount = solAmount;
+          solAmount = originalSolAmount - 0.5 * n;
+          
+          // 确保调整后的 solAmount 在有效范围内
+          if (solAmount < minAdjustedSolAmount) {
+            solAmount = Math.floor(maxAdjustedSolAmount * 2) / 2; // 向下取整到 0.5 的倍数
+          }
+          
+          // 确保至少是 1.0
+          if (solAmount < minAdjustedSolAmount) {
+            solAmount = minAdjustedSolAmount;
+          }
+          
+          // 重新计算 tokenYAmount
+          tokenYAmount = new BN(solAmount * 10 ** TOKEN_Y_DECIMAL);
+          
+          minRequiredSOL = solAmount + 0.2;
+          minRequiredLamports = minRequiredSOL * 1e9;
+          
+          console.log(`🔄 已自动调整 solAmount: ${originalSolAmount} → ${solAmount} SOL (减少 ${(originalSolAmount - solAmount).toFixed(1)} SOL)`);
+          console.log(`📊 调整后最低余额要求: ${minRequiredSOL.toFixed(1)} SOL`);
+          console.log(`✅ 余额满足要求，可以继续交易`);
+        }
       } else {
         console.log('✅ 余额充足，可以继续交易');
       }
