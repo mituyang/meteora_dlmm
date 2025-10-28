@@ -1231,6 +1231,20 @@ func readMedianPrioritizationFee() string {
 		return ""
 	}
 
+	// 检查并设置默认值
+	if swapFeeData.Q1PrioritizationFeeLamports == 0 {
+		swapFeeData.Q1PrioritizationFeeLamports = 5000000
+		logOutput("⚠️ q1为0或不存在，使用默认值: 5000000\n")
+	}
+	if swapFeeData.MedianPrioritizationFeeLamports == 0 {
+		swapFeeData.MedianPrioritizationFeeLamports = 10000000
+		logOutput("⚠️ medianPrioritizationFeeLamports为0或不存在，使用默认值: 10000000\n")
+	}
+	if swapFeeData.Q3PrioritizationFeeLamports == 0 {
+		swapFeeData.Q3PrioritizationFeeLamports = 50000000
+		logOutput("⚠️ q3为0或不存在，使用默认值: 50000000\n")
+	}
+
 	// 返回中位数费用作为字符串
 	return fmt.Sprintf("%d", swapFeeData.MedianPrioritizationFeeLamports)
 }

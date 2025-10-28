@@ -261,16 +261,16 @@ function getSwapFee(): number {
     
     const raw = fs.readFileSync(feeFilePath, 'utf8');
     const feeData = JSON.parse(raw);
-    const q1Fee = feeData?.q1PrioritizationFeeLamports;
+    let q1Fee = feeData?.q1PrioritizationFeeLamports;
     
-    if (typeof q1Fee !== 'number') {
-      console.log('⚠️ 交换费用文件格式错误，使用默认值 100000');
-      return 100000;
+    if (typeof q1Fee !== 'number' || q1Fee === 0) {
+      console.log('⚠️ q1PrioritizationFeeLamports为0或不存在，使用默认值 5000000');
+      q1Fee = 5000000;
     }
     
     // 设置上限为 500000
     const maxFee = Math.min(q1Fee, 500000);
-    console.log(`💰 从交换费用文件读取: q1PrioritizationFeeLamports=${q1Fee}, 实际使用maxfee=${maxFee}`);
+    console.log(`💰 从交换费用文件读取: q1PrioritizationFeeLamports=${feeData?.q1PrioritizationFeeLamports || 0}, 实际使用maxfee=${maxFee}`);
     
     return maxFee;
   } catch (error) {

@@ -31,10 +31,20 @@ function readSwapFeeData(): { q1: number; q3: number } | null {
     const content = fs.readFileSync(swapFeePath, 'utf8');
     const data = JSON.parse(content);
 
-    return {
-      q1: data.q1PrioritizationFeeLamports || 0,
-      q3: data.q3PrioritizationFeeLamports || 0
-    };
+    // 检查并设置默认值
+    let q1 = data.q1PrioritizationFeeLamports || 0;
+    let q3 = data.q3PrioritizationFeeLamports || 0;
+    
+    if (q1 === 0) {
+      q1 = 5000000;
+      console.log('⚠️ q1为0或不存在，使用默认值: 5000000');
+    }
+    if (q3 === 0) {
+      q3 = 50000000;
+      console.log('⚠️ q3为0或不存在，使用默认值: 50000000');
+    }
+
+    return { q1, q3 };
   } catch (error) {
     console.error('❌ 读取交换费用数据失败:', error);
     return null;
