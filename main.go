@@ -1121,11 +1121,18 @@ func getTokenBalancesFromJupSwap() []string {
 	// 读取黑名单（每次执行时重新读取，支持动态更新）
 	banList := readBanList()
 
+	// 读取白名单（每次执行时重新读取，支持动态更新）
+	whiteList := readWhiteList()
+
 	// 解析输出，提取代币地址
 	tokenAddresses := parseTokenAddressesFromOutput(outputStr, banList)
 	logOutput("📊 从持仓信息中解析出 %d 个代币地址（已过滤黑名单）\n", len(tokenAddresses))
 
-	return tokenAddresses
+	// 应用白名单过滤
+	filteredAddresses := filterByWhiteList(tokenAddresses, whiteList)
+	logOutput("📊 应用白名单后剩余 %d 个代币地址\n", len(filteredAddresses))
+
+	return filteredAddresses
 }
 
 // 读取黑名单ca地址
@@ -1166,6 +1173,79 @@ func readBanList() map[string]bool {
 
 	logOutput("📊 加载了 %d 个黑名单ca\n", len(banList))
 	return banList
+}
+
+// 读取白名单ca地址（从data/和data/history/目录下的JSON文件中提取）
+func readWhiteList() map[string]bool {
+	whiteList := make(map[string]bool)
+
+	// 要扫描的目录列表
+	directories := []string{
+		"/Users/yqw/meteora_dlmm/data",
+		"/Users/yqw/meteora_dlmm/data/history",
+	}
+
+	totalFiles := 0
+	for _, dir := range directories {
+		// 检查目录是否存在
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			logOutput("⚠️ 白名单目录不存在: %s\n", dir)
+			continue
+		}
+
+		// 读取目录中的所有JSON文件
+		files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+		if err != nil {
+			logOutput("❌ 读取目录失败 %s: %v\n", dir, err)
+			continue
+		}
+
+		// 处理每个JSON文件
+		for _, file := range files {
+			// 读取JSON文件内容
+			content, err := os.ReadFile(file)
+			if err != nil {
+				logOutput("⚠️ 读取白名单JSON文件失败 %s: %v\n", file, err)
+				continue
+			}
+
+			// 解析JSON
+			var data map[string]interface{}
+			if err := json.Unmarshal(content, &data); err != nil {
+				logOutput("⚠️ 解析白名单JSON文件失败 %s: %v\n", file, err)
+				continue
+			}
+
+			// 提取data.ca字段
+			if dataMap, ok := data["data"].(map[string]interface{}); ok {
+				if ca, ok := dataMap["ca"].(string); ok && ca != "" {
+					whiteList[ca] = true
+				}
+			}
+			totalFiles++
+		}
+	}
+
+	logOutput("📊 从 %d 个JSON文件中加载了 %d 个白名单ca\n", totalFiles, len(whiteList))
+	return whiteList
+}
+
+// 根据白名单过滤代币地址
+func filterByWhiteList(tokenAddresses []string, whiteList map[string]bool) []string {
+	if len(whiteList) == 0 {
+		logOutput("⚠️ 白名单为空，不进行白名单过滤\n")
+		return tokenAddresses
+	}
+
+	var filtered []string
+	for _, addr := range tokenAddresses {
+		if whiteList[addr] {
+			filtered = append(filtered, addr)
+		} else {
+			logOutput("🚫 代币不在白名单中，已过滤: %s\n", addr)
+		}
+	}
+	return filtered
 }
 
 // 从jupSwap输出中解析代币地址
