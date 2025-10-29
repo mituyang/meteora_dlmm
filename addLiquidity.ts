@@ -171,6 +171,14 @@ function resolveEnableOkxFromArgs(): boolean | undefined {
   return undefined;
 }
 
+// 检查是否是重试执行（防止无限嵌套重试）
+function isRetryExecution(): boolean {
+  for (const arg of argv) {
+    if (arg === '--is-retry') return true;
+  }
+  return false;
+}
+
 // 从命令行读取 last_updated_first（仅命令行传入）
 function resolveLastUpdatedFirstFromArgs(): string | undefined {
   for (let i = 0; i < argv.length; i++) {
@@ -712,6 +720,13 @@ async function main(retryCount: number = 0) {
     }
     
     console.log('✅ 所有环境变量配置完成');
+    
+    // 检查是否是重试执行
+    const isRetry = isRetryExecution();
+    if (isRetry) {
+      console.log('🔄 当前为重试执行模式（不会再次启动并行重试）');
+    }
+    
     // Bin 计算模式切换：默认 last_updated_first，可在 .env 配置 BIN_RANGE_MODE
     const binRangeMode = (process.env.BIN_RANGE_MODE || 'last_updated_first').toLowerCase();
     console.log(`📊 模式: ${binRangeMode === 'last_updated_first' ? 'last_updated_first' : '自动计算Bin ID'}`);
@@ -833,6 +848,7 @@ async function main(retryCount: number = 0) {
       // 获取当前脚本的命令行参数，用于重试时传递
       const tokenAddress = resolveTokenAddressFromArgs();
       const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
+      const totalQuoteLiquidityFirst = resolveTotalQuoteLiquidityFirstFromArgs();
       
       // 使用setImmediate确保不阻塞当前执行
       setImmediate(async () => {
@@ -844,12 +860,15 @@ async function main(retryCount: number = 0) {
             await new Promise(resolve => setTimeout(resolve, waitTimeMs));
             
             // 构建重试命令参数
-            const retryArgs = ['ts-node', 'addLiquidity.ts', `--pool=${poolAddress}`];
+            const retryArgs = ['ts-node', 'addLiquidity.ts', `--pool=${poolAddress}`, '--is-retry'];
             if (tokenAddress) {
               retryArgs.push(`--token=${tokenAddress}`);
             }
             if (lastUpdatedFirst) {
               retryArgs.push(`--last_updated_first=${lastUpdatedFirst}`);
+            }
+            if (totalQuoteLiquidityFirst) {
+              retryArgs.push(`--total_quote_liquidity_first=${totalQuoteLiquidityFirst}`);
             }
             
             const retryCommand = `npx ${retryArgs.join(' ')}`;
@@ -964,8 +983,10 @@ async function main(retryCount: number = 0) {
       // 验证自动模式计算出的minBinId
       const validationResult = validateMinBinId(minBinId, '自动');
       if (!validationResult.shouldContinue) {
-        if (validationResult.shouldRetry) {
+        if (validationResult.shouldRetry && !isRetryExecution()) {
           startParallelRetry(POOL_ADDRESS.toString());
+        } else if (isRetryExecution()) {
+          console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
         }
         return; // 退出程序
       }
@@ -1160,8 +1181,10 @@ async function main(retryCount: number = 0) {
                   // 验证价格比较模式（自动分支）计算出的minBinId
                   const validationResult = validateMinBinId(minBinId, '价格比较-自动');
                   if (!validationResult.shouldContinue) {
-                    if (validationResult.shouldRetry) {
+                    if (validationResult.shouldRetry && !isRetryExecution()) {
                       startParallelRetry(POOL_ADDRESS.toString());
+                    } else if (isRetryExecution()) {
+                      console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
                     }
                     return; // 退出程序
                   }
@@ -1182,8 +1205,10 @@ async function main(retryCount: number = 0) {
                   // 验证价格比较模式（新方式分支）计算出的minBinId
                   const validationResult = validateMinBinId(minBinId, '价格比较-新方式');
                   if (!validationResult.shouldContinue) {
-                    if (validationResult.shouldRetry) {
+                    if (validationResult.shouldRetry && !isRetryExecution()) {
                       startParallelRetry(POOL_ADDRESS.toString());
+                    } else if (isRetryExecution()) {
+                      console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
                     }
                     return; // 退出程序
                   }
@@ -1230,8 +1255,10 @@ async function main(retryCount: number = 0) {
       // 验证last_updated_first模式计算出的minBinId
       const validationResult = validateMinBinId(minBinId, 'last_updated_first');
       if (!validationResult.shouldContinue) {
-        if (validationResult.shouldRetry) {
+        if (validationResult.shouldRetry && !isRetryExecution()) {
           startParallelRetry(POOL_ADDRESS.toString());
+        } else if (isRetryExecution()) {
+          console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
         }
         return; // 退出程序
       }
@@ -1506,10 +1533,10 @@ async function main(retryCount: number = 0) {
           // await new Promise(resolve => setTimeout(resolve, 3000));
           // console.log('✅ 等待完成，准备重新执行');
           
-          // 重新执行整个addLiquidity流程（最多重试10次）
+          // 重新执行整个addLiquidity流程（内外层共享，最多重试10次）
           const maxRetries = 10;
           if (retryCount < maxRetries) {
-            console.log(`🔄 重新执行addLiquidity.ts... (第 ${retryCount + 1}/${maxRetries} 次重试)`);
+            console.log(`🔄 [内层重试] 重新执行addLiquidity.ts... (总第 ${retryCount + 1}/${maxRetries} 次重试)`);
             await main(retryCount + 1);
           } else {
             console.log(`❌ 已达到最大重试次数 (${maxRetries})，停止重试`);
@@ -1531,6 +1558,17 @@ async function main(retryCount: number = 0) {
     
   } catch (error) {
     console.error('错误:', error);
+    
+    // 最多重试10次（内外层共享）
+    const maxRetries = 10;
+    if (retryCount < maxRetries) {
+      console.log(`🔄 [外层重试] 发生错误，将在1秒后重新执行addLiquidity.ts... (总第 ${retryCount + 1}/${maxRetries} 次重试)`);
+      await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒
+      return main(retryCount + 1); // 递归重试
+    } else {
+      console.log(`❌ 已达到最大重试次数 (${maxRetries})，停止重试`);
+      process.exit(1); // 退出码1表示执行失败
+    }
   }
 }
 
