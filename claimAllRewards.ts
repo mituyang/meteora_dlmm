@@ -454,7 +454,7 @@ async function claimAllRewardsByPosition() {
       throw new Error('缺少必需的仓位地址：请通过 --position= 或 --position-address= 传入，或在环境变量中设置 POSITION_ADDRESS');
     }
     const positionPubKey = new PublicKey(positionAddressStr);
-    const position = await withRetry(() => dlmmPool.getPosition(positionPubKey), 'dlmmPool.getPosition');
+    const position: any = await withRetry(() => dlmmPool.getPosition(positionPubKey), 'dlmmPool.getPosition');
 
     // 3. 获取可领取费用数量和判断是否领取
     console.log('\n=== 检查可领取费用 ===');
