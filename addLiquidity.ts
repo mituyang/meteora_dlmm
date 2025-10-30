@@ -171,13 +171,6 @@ function resolveEnableOkxFromArgs(): boolean | undefined {
   return undefined;
 }
 
-// 检查是否是重试执行（防止无限嵌套重试）
-function isRetryExecution(): boolean {
-  for (const arg of argv) {
-    if (arg === '--is-retry') return true;
-  }
-  return false;
-}
 
 // 从命令行读取 last_updated_first（仅命令行传入）
 function resolveLastUpdatedFirstFromArgs(): string | undefined {
@@ -721,11 +714,7 @@ async function main(retryCount: number = 0) {
     
     console.log('✅ 所有环境变量配置完成');
     
-    // 检查是否是重试执行
-    const isRetry = isRetryExecution();
-    if (isRetry) {
-      console.log('🔄 当前为重试执行模式（不会再次启动并行重试）');
-    }
+
     
     // Bin 计算模式切换：默认 last_updated_first，可在 .env 配置 BIN_RANGE_MODE
     const binRangeMode = (process.env.BIN_RANGE_MODE || 'last_updated_first').toLowerCase();
@@ -983,10 +972,8 @@ async function main(retryCount: number = 0) {
       // 验证自动模式计算出的minBinId
       const validationResult = validateMinBinId(minBinId, '自动');
       if (!validationResult.shouldContinue) {
-        if (validationResult.shouldRetry && !isRetryExecution()) {
+        if (validationResult.shouldRetry) {
           startParallelRetry(POOL_ADDRESS.toString());
-        } else if (isRetryExecution()) {
-          console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
         }
         return; // 退出程序
       }
@@ -1057,6 +1044,7 @@ async function main(retryCount: number = 0) {
         if (maxAdjustedSolAmount < minAdjustedSolAmount) {
           console.log(`❌ 余额过低！至少需要 ${minAdjustedSolAmount + 0.2} SOL，当前仅有 ${balanceSOL.toFixed(6)} SOL`);
           console.log(`建议充值至少 ${(minAdjustedSolAmount + 0.2).toFixed(1)} SOL`);
+          throw new Error(`余额不足：当前 ${balanceSOL.toFixed(6)} SOL，至少需要 ${(minAdjustedSolAmount + 0.2).toFixed(1)} SOL`);
         } else {
           // 计算需要减少多少（以 0.5 为单位）
           const reductionNeeded = solAmount - maxAdjustedSolAmount;
@@ -1090,6 +1078,7 @@ async function main(retryCount: number = 0) {
       }
     } catch (error) {
       console.log('❌ 无法获取余额信息');
+      throw new Error(`无法获取余额信息: ${error instanceof Error ? error.message : String(error)}`);
     }
     
     // 获取 OKX DEX K线和价格（默认关闭，仅显式开启时执行）
@@ -1181,11 +1170,9 @@ async function main(retryCount: number = 0) {
                   // 验证价格比较模式（自动分支）计算出的minBinId
                   const validationResult = validateMinBinId(minBinId, '价格比较-自动');
                   if (!validationResult.shouldContinue) {
-                    if (validationResult.shouldRetry && !isRetryExecution()) {
+                    if (validationResult.shouldRetry) {
                       startParallelRetry(POOL_ADDRESS.toString());
-                    } else if (isRetryExecution()) {
-                      console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
-                    }
+                    } 
                     return; // 退出程序
                   }
                 } else {
@@ -1205,28 +1192,28 @@ async function main(retryCount: number = 0) {
                   // 验证价格比较模式（新方式分支）计算出的minBinId
                   const validationResult = validateMinBinId(minBinId, '价格比较-新方式');
                   if (!validationResult.shouldContinue) {
-                    if (validationResult.shouldRetry && !isRetryExecution()) {
+                    if (validationResult.shouldRetry) {
                       startParallelRetry(POOL_ADDRESS.toString());
-                    } else if (isRetryExecution()) {
-                      console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
                     }
                     return; // 退出程序
                   }
                 }
               } else {
                 console.log('未获取到最新价格，停止执行');
-                return; // 直接停止，不再继续默认 last_updated_first 模式
+                throw new Error('未获取到最新价格，无法继续执行');
               }
             } else {
               console.log('❌ 未在 K 线中找到匹配时间戳，停止添加流动性');
-              return; // 停止添加流动性
+              throw new Error('未在 K 线中找到匹配时间戳');
             }
           } catch (e) {
             console.log('解析 last_updated_first 失败:', e instanceof Error ? e.message : String(e));
+            throw e; // 重新抛出错误
           }
         }
       } catch (e) {
         console.log('获取 OKX DEX K线失败:', e instanceof Error ? e.message : String(e));
+        throw e; // 重新抛出错误
       }
     } else {
       if (!enableOkx) {
@@ -1255,10 +1242,8 @@ async function main(retryCount: number = 0) {
       // 验证last_updated_first模式计算出的minBinId
       const validationResult = validateMinBinId(minBinId, 'last_updated_first');
       if (!validationResult.shouldContinue) {
-        if (validationResult.shouldRetry && !isRetryExecution()) {
+        if (validationResult.shouldRetry) {
           startParallelRetry(POOL_ADDRESS.toString());
-        } else if (isRetryExecution()) {
-          console.log(`⚠️ 当前为重试执行，不再启动新的重试循环，直接退出`);
         }
         return; // 退出程序
       }
@@ -1489,6 +1474,10 @@ async function main(retryCount: number = 0) {
         }
       }
       
+      // 成功添加流动性后，立即退出，避免继续重试
+      console.log('✅ addLiquidity.ts 执行完成，准备退出');
+      return; // 成功退出，不再重试
+      
     } catch (error) {
       console.log('❌ 添加流动性过程中发生错误:');
       console.log(JSON.stringify({
@@ -1558,17 +1547,6 @@ async function main(retryCount: number = 0) {
     
   } catch (error) {
     console.error('错误:', error);
-    
-    // 最多重试10次（内外层共享）
-    const maxRetries = 10;
-    if (retryCount < maxRetries) {
-      console.log(`🔄 [外层重试] 发生错误，将在1秒后重新执行addLiquidity.ts... (总第 ${retryCount + 1}/${maxRetries} 次重试)`);
-      await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒
-      return main(retryCount + 1); // 递归重试
-    } else {
-      console.log(`❌ 已达到最大重试次数 (${maxRetries})，停止重试`);
-      process.exit(1); // 退出码1表示执行失败
-    }
   }
 }
 
