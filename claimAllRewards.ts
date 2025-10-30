@@ -575,27 +575,68 @@ async function claimAllRewardsByPosition() {
             if (isNaN(solAmountFromJson)) {
               console.log('⚠️ JSON中的solAmount无效，跳过止盈判断');
             } else {
-              const thresholdSol = solAmountFromJson * 1.05;
-              console.log(`📊 JSON中的solAmount: ${solAmountFromJson}`);
-              console.log(`🪙 ${thresholdSol.toFixed(2)} SOL 的USD价格: ${(thresholdSol * solUsdPrice).toFixed(6)}`);
-              const threshold = thresholdSol * solUsdPrice;
-              console.log('threshold为:', threshold);
-              if (sumUsd >= threshold) {
-                console.log(`✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ ${thresholdSol.toFixed(2)} SOL 的USD，触发移除流动性`);
-                // 触发移除流动性，执行内部swap
-                try {
-                  const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
-                  console.log(`🛠️ 触发移除流动性: ${cmd}`);
-                  const { stdout, stderr } = await execAsync(cmd, { cwd: '/Users/yqw/meteora_dlmm' });
-                  if (stdout) console.log(stdout);
-                  if (stderr) console.error(stderr);
-                } catch (e) {
-                  console.error('❌ 触发移除流动性失败:', e);
-                }
-                // 直接返回，避免继续领取
-                return;
+              // 止盈判断：选择两个价格源的最小值
+              let xUsdPriceForTakeProfit: number | undefined;
+              const xPriceFromCache = caX ? readUsdPriceFromCache(caX) : undefined;
+              
+              // 同时获取 OKX API 价格和缓存价格
+              const xPriceFromApi = xUsdPrice;  // 已经在上面通过 fetchOkxLatestPrice 获取
+              
+              // 选择最小值，或者使用任一可用的价格
+              if (xPriceFromApi !== undefined && xPriceFromCache !== undefined) {
+                xUsdPriceForTakeProfit = Math.min(xPriceFromApi, xPriceFromCache);
+                console.log(`📊 止盈价格选择: API价格=${xPriceFromApi}, 缓存价格=${xPriceFromCache}, 使用最小值=${xUsdPriceForTakeProfit}`);
+              } else if (xPriceFromApi !== undefined) {
+                xUsdPriceForTakeProfit = xPriceFromApi;
+                console.log(`📊 止盈价格选择: 仅API价格可用=${xUsdPriceForTakeProfit}`);
+              } else if (xPriceFromCache !== undefined) {
+                xUsdPriceForTakeProfit = xPriceFromCache;
+                console.log(`📊 止盈价格选择: 仅缓存价格可用=${xUsdPriceForTakeProfit}`);
               } else {
-                console.log(`❌ (累计领取USD + 当前positionUSD) 未达到 ${thresholdSol.toFixed(2)} SOL 的USD，继续流程`);
+                console.log('⚠️ 无法获取X代币价格（API和缓存均失败），跳过止盈判断');
+                xUsdPriceForTakeProfit = undefined;
+              }
+              
+              if (xUsdPriceForTakeProfit !== undefined) {
+                // 使用最小价格重新计算止盈用的 sumUsd
+                const currentPositionUsdForTakeProfit = currentX * xUsdPriceForTakeProfit + currentY * solUsdPrice;
+                const baseSumUsdForTakeProfit = totalUsd + currentPositionUsdForTakeProfit;
+                const pendingFeeX = position.positionData.feeX.toNumber() / Math.pow(10, tokenXDecimals);
+                const pendingFeeY = position.positionData.feeY.toNumber() / Math.pow(10, tokenYDecimals);
+                const pendingUsdXForTakeProfit = pendingFeeX * xUsdPriceForTakeProfit;
+                const pendingUsdYForTakeProfit = pendingFeeY * solUsdPrice;
+                const sumUsdForTakeProfit = baseSumUsdForTakeProfit + pendingUsdXForTakeProfit + pendingUsdYForTakeProfit;
+                
+                console.log(`💰 止盈计算 - 使用最小价格 ${xUsdPriceForTakeProfit}:`);
+                console.log(`   当前position价值(USD): X=${(currentX * xUsdPriceForTakeProfit).toFixed(6)}, Y=${(currentY * solUsdPrice).toFixed(6)}, sum=${currentPositionUsdForTakeProfit.toFixed(6)}`);
+                console.log(`   未领取费用USD价值: X=${pendingUsdXForTakeProfit.toFixed(6)}, Y=${pendingUsdYForTakeProfit.toFixed(6)}, sum=${(pendingUsdXForTakeProfit + pendingUsdYForTakeProfit).toFixed(6)}`);
+                console.log(`   累计总价值USD: ${sumUsdForTakeProfit.toFixed(6)}`);
+                
+                const takeProfitTargetSol = solAmountFromJson * 1.05;
+                console.log(`📊 JSON中的solAmount: ${solAmountFromJson}`);
+                const initialInvestmentUsd = solAmountFromJson * solUsdPrice;
+                console.log(`💵 初始投入USD: ${initialInvestmentUsd.toFixed(6)}`);
+                console.log(`🪙 ${takeProfitTargetSol.toFixed(2)} SOL 的USD价格: ${(takeProfitTargetSol * solUsdPrice).toFixed(6)}`);
+                const takeProfitTargetUsd = takeProfitTargetSol * solUsdPrice;
+                console.log('💰 止盈目标USD为:', takeProfitTargetUsd);
+                
+                if (sumUsdForTakeProfit >= takeProfitTargetUsd) {
+                  console.log(`✅ (累计已领取USD + 当前positionUSD + 未领取费用USD) ≥ ${takeProfitTargetSol.toFixed(2)} SOL 的USD，触发移除流动性`);
+                  // 触发移除流动性，执行内部swap
+                  try {
+                    const cmd = `npx ts-node removeLiquidity.ts --pool=${poolAddress.toString()} --position=${positionPubKey.toString()}`;
+                    console.log(`🛠️ 触发移除流动性: ${cmd}`);
+                    const { stdout, stderr } = await execAsync(cmd, { cwd: '/Users/yqw/meteora_dlmm' });
+                    if (stdout) console.log(stdout);
+                    if (stderr) console.error(stderr);
+                  } catch (e) {
+                    console.error('❌ 触发移除流动性失败:', e);
+                  }
+                  // 直接返回，避免继续领取
+                  return;
+                } else {
+                  console.log(`❌ (累计领取USD + 当前positionUSD) 未达到 ${takeProfitTargetSol.toFixed(2)} SOL 的USD，继续流程`);
+                }
               }
             }
           } else {
