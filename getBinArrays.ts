@@ -36,6 +36,24 @@ function beijingNow(): string {
   console.debug = (...args: any[]) => origDebug(prefix(), ...args);
 })();
 
+// 通用重试工具：失败等待1秒再试，共最多3次（首试+重试2次）
+async function withRetry<T>(fn: () => Promise<T>, desc: string): Promise<T> {
+  const maxAttempts = 3;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        console.log(`获取失败，1秒后重试(${attempt}/${maxAttempts - 1}) -> ${desc}:`, err instanceof Error ? err.message : String(err));
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 // 分析bin数据的函数
 function analyzeBinData(outputData: any): {isComplete: boolean, minToActiveComplete: boolean} {
   console.log('\n=== Bin数据分析 ===');
@@ -142,13 +160,13 @@ async function processPool(connection: Connection, poolAddress: string) {
   try {
     // 创建DLMM实例
     const dlmmCreateStart = Date.now();
-    const dlmmPool = await DLMM.create(connection, poolPubkey);
+    const dlmmPool = await withRetry(() => DLMM.create(connection, poolPubkey), 'DLMM池实例创建');
     const dlmmCreateTime = Date.now() - dlmmCreateStart;
     console.log(`⏱️  [${poolAddress}] DLMM实例创建耗时: ${dlmmCreateTime}ms`);
     
     // 获取所有bin arrays
     const getBinArraysStart = Date.now();
-    const binArrays = await dlmmPool.getBinArrays();
+    const binArrays = await withRetry(() => dlmmPool.getBinArrays(), 'binArrays获取');
     const getBinArraysTime = Date.now() - getBinArraysStart;
     console.log(`⏱️  [${poolAddress}] 获取binArrays耗时: ${getBinArraysTime}ms`);
     console.log(`📊 [${poolAddress}] 获取到 ${binArrays.length} 个bin arrays`);

@@ -627,11 +627,11 @@ async function completeSpotStrategyFlow(
   createTransaction.sign(positionKeypair as any);
   const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
   versionedCreateTransaction.sign([positionKeypair as any]);
-  const createTxHash = await connection.sendTransaction(versionedCreateTransaction);
+  const createTxHash = await withRetry(() => connection.sendTransaction(versionedCreateTransaction), 'completeSpotStrategyFlow创建交易发送');
   console.log('✅ 创建交易已发送:', createTxHash);
   
   // 等待交易确认
-  await connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true });
+  await withRetry(() => connection.getSignatureStatus(createTxHash, { searchTransactionHistory: true }), 'completeSpotStrategyFlow创建交易状态查询');
   console.log('✅ 创建交易已确认');
   
   // 步骤3: 添加策略流动性
@@ -656,7 +656,7 @@ async function completeSpotStrategyFlow(
   addLiquidityTransaction.sign(userKeypair as any);
   const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
   versionedAddLiquidityTransaction.sign([userKeypair as any]);
-  const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
+  const addLiquidityTxHash = await withRetry(() => connection.sendTransaction(versionedAddLiquidityTransaction), 'completeSpotStrategyFlow添加流动性交易发送');
   console.log('✅ 添加流动性交易已发送:', addLiquidityTxHash);
   
   // 等待交易确认（带重试和状态检查）
@@ -665,7 +665,7 @@ async function completeSpotStrategyFlow(
   let addLiquidityAttempts = 0;
   const maxAddLiquidityAttempts = 30;
   while (!addLiquidityConfirmed && addLiquidityAttempts < maxAddLiquidityAttempts) {
-    const status = await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+    const status = await withRetry(() => connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true }), 'completeSpotStrategyFlow添加流动性交易状态查询');
     if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
       // 检查交易是否成功（没有错误）
       if (status.value?.err === null) {
@@ -735,7 +735,7 @@ async function main(retryCount: number = 0) {
     console.log(`📊 最终使用的策略类型: ${determinedStrategy}`);
     
     // 创建DLMM池实例（带重试）
-    const dlmmPool = await DLMM.create(connection, POOL_ADDRESS);
+    const dlmmPool = await withRetry(() => DLMM.create(connection, POOL_ADDRESS), 'DLMM池实例创建');
     
     // 单边池参数 - tokenXAmount为0，只提供tokenY
     const tokenXAmount = new BN(0); // 单边池，Token X 数量为0
@@ -1020,7 +1020,7 @@ async function main(retryCount: number = 0) {
     
     // 检查钱包余额
     try {
-      const balance = await connection.getBalance(userKeypair.publicKey);
+      const balance = await withRetry(() => connection.getBalance(userKeypair.publicKey), '钱包余额查询');
       const balanceSOL = balance / 1e9;
       console.log(`💰 钱包余额: ${balanceSOL.toFixed(6)} SOL (${balance} lamports)`);
       
@@ -1092,7 +1092,7 @@ async function main(retryCount: number = 0) {
       // 先尝试获取最新价格（不阻塞 K 线）
       try {
         console.log('🔄 正在获取OKX最新价格...');
-        latestPrice = await fetchOkxLatestPrice(tokenFromCli);
+        latestPrice = await withRetry(() => fetchOkxLatestPrice(tokenFromCli), 'OKX最新价格获取');
         if (latestPrice !== undefined) {
           console.log('OKX DEX 最新价格:', latestPrice);
         } else {
@@ -1108,7 +1108,7 @@ async function main(retryCount: number = 0) {
       // 再获取 K 线
       try {
         console.log('🔄 正在获取OKX K线数据...');
-        const kline = await fetchOkxCandles(tokenFromCli);
+        const kline = await withRetry(() => fetchOkxCandles(tokenFromCli), 'OKX K线数据获取');
         const lastUpdatedFirst = resolveLastUpdatedFirstFromArgs();
         if (lastUpdatedFirst) {
           try {
@@ -1258,8 +1258,6 @@ async function main(retryCount: number = 0) {
     // 等待一段时间
     // console.log('等待 20 秒...');
     // await new Promise(resolve => setTimeout(resolve, 20000));
-
-    // 优先复用已有 positionAddress；否则加锁创建一次并持久化
     const poolFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.json`);
     const lockFile = path.resolve(__dirname, 'data', `${POOL_ADDRESS.toString()}.lock`);
     let existingPositionAddress: string | undefined;
@@ -1278,8 +1276,8 @@ async function main(retryCount: number = 0) {
     let createTxHash: string | undefined;
 
     if (existingPositionAddress) {
-      console.log(`🔁 复用已有仓位: ${existingPositionAddress}`);
-      positionPubKey = new PublicKey(existingPositionAddress);
+      console.log(`⚠️ 检测到已有仓位 ${existingPositionAddress}，停止添加流动性`);
+      return;
     } else {
       // 获取每池互斥锁
       const lockStart = Date.now();
@@ -1292,15 +1290,14 @@ async function main(retryCount: number = 0) {
           fs.closeSync(fd);
           hasLock = true;
         } catch (_) {
-          // 等待锁期间二次校验 JSON，若已有 positionAddress 则复用
+          // 等待锁期间二次校验 JSON，若已有 positionAddress 则退出
           try {
             const raw2 = fs.readFileSync(poolFile, 'utf8');
             const json2 = JSON.parse(raw2);
             const addr2 = (json2 && typeof json2.positionAddress === 'string') ? json2.positionAddress.trim() : '';
             if (addr2) {
-              console.log(`🔁 等锁期间检测到已有仓位，复用: ${addr2}`);
-              positionPubKey = new PublicKey(addr2);
-              break;
+              console.log(`⚠️ 等锁期间检测到已有仓位 ${addr2}，停止添加流动性`);
+              return;
             }
           } catch (_) {}
           if (Date.now() - lockStart > lockTimeoutMs) {
@@ -1311,15 +1308,15 @@ async function main(retryCount: number = 0) {
         }
       }
 
-      // 最终校验一次，避免并发重复创建
+      // 最终校验一次，若检测到已有仓位则退出
       if (!positionPubKey) {
         try {
           const raw3 = fs.readFileSync(poolFile, 'utf8');
           const json3 = JSON.parse(raw3);
           const addr3 = (json3 && typeof json3.positionAddress === 'string') ? json3.positionAddress.trim() : '';
           if (addr3) {
-            console.log(`🔁 创建前最终校验命中已有仓位，复用: ${addr3}`);
-            positionPubKey = new PublicKey(addr3);
+            console.log(`⚠️ 创建前最终校验检测到已有仓位 ${addr3}，停止添加流动性`);
+            return;
           }
         } catch (_) {}
       }
@@ -1339,7 +1336,7 @@ async function main(retryCount: number = 0) {
           createTransaction.sign(userKeypair as any, positionKeypair as any);
           const versionedCreateTransaction = new VersionedTransaction(createTransaction.compileMessage());
           versionedCreateTransaction.sign([userKeypair as any, positionKeypair as any]);
-          createTxHash = await connection.sendTransaction(versionedCreateTransaction);
+          createTxHash = await withRetry(() => connection.sendTransaction(versionedCreateTransaction), '创建仓位交易发送');
           console.log('创建交易哈希:', createTxHash);
 
           // 等待交易确认
@@ -1348,7 +1345,7 @@ async function main(retryCount: number = 0) {
           let attempts = 0;
           const maxAttempts = 30;
           while (!confirmed && attempts < maxAttempts) {
-            const status = await connection.getSignatureStatus(createTxHash!, { searchTransactionHistory: true });
+            const status = await withRetry(() => connection.getSignatureStatus(createTxHash!, { searchTransactionHistory: true }), '创建交易状态查询');
             if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
               confirmed = true;
               console.log('✅ 创建交易已确认');
@@ -1412,7 +1409,7 @@ async function main(retryCount: number = 0) {
       addLiquidityTransaction.sign(userKeypair as any);
       const versionedAddLiquidityTransaction = new VersionedTransaction(addLiquidityTransaction.compileMessage());
       versionedAddLiquidityTransaction.sign([userKeypair as any]);
-      const addLiquidityTxHash = await connection.sendTransaction(versionedAddLiquidityTransaction);
+      const addLiquidityTxHash = await withRetry(() => connection.sendTransaction(versionedAddLiquidityTransaction), '添加流动性交易发送');
       console.log('添加流动性交易哈希:', addLiquidityTxHash);
       
       // 等待交易确认（带重试和状态检查）
@@ -1421,7 +1418,7 @@ async function main(retryCount: number = 0) {
       let addLiquidityAttempts = 0;
       const maxAddLiquidityAttempts = 30;
       while (!addLiquidityConfirmed && addLiquidityAttempts < maxAddLiquidityAttempts) {
-        const status = await connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true });
+        const status = await withRetry(() => connection.getSignatureStatus(addLiquidityTxHash, { searchTransactionHistory: true }), '添加流动性交易状态查询');
         if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
           // 检查交易是否成功（没有错误）
           if (status.value?.err === null) {
@@ -1445,8 +1442,6 @@ async function main(retryCount: number = 0) {
       console.log('仓位地址:', positionPubKey!.toString());
       if (createTxHash) {
         console.log('创建交易:', createTxHash);
-      } else {
-        console.log('创建交易: 复用已有仓位，未新建');
       }
       console.log('添加流动性交易:', addLiquidityTxHash);
       
@@ -1564,7 +1559,7 @@ async function closeEmptyPosition(
     console.log('🔧 尝试关闭空仓位...');
     
     // 获取仓位对象
-    const position = await dlmmPool.getPosition(positionPubKey);
+    const position = await withRetry(() => dlmmPool.getPosition(positionPubKey), '仓位对象获取');
     
     // 使用 closePositionIfEmpty 方法关闭空仓位
     const closeTransaction = await dlmmPool.closePositionIfEmpty({
@@ -1580,10 +1575,10 @@ async function closeEmptyPosition(
     const versionedTransaction = new VersionedTransaction(closeTransaction.compileMessage());
     versionedTransaction.sign([userKeypair as any]);
     
-    const txHash = await connection.sendTransaction(versionedTransaction);
+    const txHash = await withRetry(() => connection.sendTransaction(versionedTransaction), '关闭仓位交易发送');
     console.log('关闭仓位交易哈希:', txHash);
     
-    await connection.getSignatureStatus(txHash, { searchTransactionHistory: true });
+    await withRetry(() => connection.getSignatureStatus(txHash, { searchTransactionHistory: true }), '关闭仓位交易状态查询');
     console.log('关闭仓位交易已确认');
     
     console.log('✅ 空仓位关闭完成');

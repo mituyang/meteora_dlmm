@@ -200,8 +200,8 @@ async function getPositionTotalXAmount(poolAddress: string, positionAddress: str
     console.log(`🔎 准备读取仓位X数量: pool=${poolAddress}, position=${positionAddress}`);
     const poolPubKey = new PublicKey(poolAddress);
     const positionPubKey = new PublicKey(positionAddress);
-    const dlmmPool = await DLMM.create(connection, poolPubKey);
-    const position = await dlmmPool.getPosition(positionPubKey);
+    const dlmmPool = await withRetry(() => DLMM.create(connection, poolPubKey), 'DLMM池实例创建');
+    const position = await withRetry(() => dlmmPool.getPosition(positionPubKey), '仓位对象获取');
     // position.positionData.totalXAmount 可能是 BN-like，转为字符串再到 BigInt
     const raw: any = position.positionData.totalXAmount;
     const v = typeof raw === 'string' ? BigInt(raw) : BigInt(raw.toString());
@@ -499,7 +499,7 @@ export async function fetchOkxLatestPrice(tokenContractAddress: string): Promise
   }
 
   try {
-    const data = await fetchOkxCandles(tokenContractAddress);
+    const data = await withRetry(() => fetchOkxCandles(tokenContractAddress), 'OKX K线数据获取');
     
     if (!data || !Array.isArray(data.data) || data.data.length === 0) {
       console.log('OKX K线响应为空或无数据');
@@ -591,7 +591,7 @@ async function main() {
     
     // 获取最新价格
     console.log('🔄 正在获取OKX最新价格...');
-    const latestPrice = await fetchOkxLatestPrice(tokenAddress);
+    const latestPrice = await withRetry(() => fetchOkxLatestPrice(tokenAddress), 'OKX最新价格获取');
     if (latestPrice !== undefined) {
       console.log('OKX DEX 最新价格:', latestPrice);
       console.log('price:', latestPrice); // 专门输出price字段，供main.go解析

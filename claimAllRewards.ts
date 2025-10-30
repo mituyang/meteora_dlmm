@@ -463,7 +463,7 @@ async function claimAllRewardsByPosition() {
     const getTokenDecimals = async (mintAddress: PublicKey): Promise<number> => {
       try {
         console.log(`🔄 正在获取代币精度: ${mintAddress.toString()}`);
-        const tokenInfo = await connection.getParsedAccountInfo(mintAddress);
+        const tokenInfo = await withRetry(() => connection.getParsedAccountInfo(mintAddress), '代币精度信息获取');
         if (tokenInfo.value?.data && 'parsed' in tokenInfo.value.data) {
           const decimals = tokenInfo.value.data.parsed.info.decimals;
           console.log(`✅ 代币 ${mintAddress.toString()} 精度: ${decimals}`);
@@ -511,7 +511,7 @@ async function claimAllRewardsByPosition() {
       try {
         const apiUrl = `https://dlmm-api.meteora.ag/position/${positionPubKey.toString()}`;
         console.log(`🔄 尝试调用 Meteora API (第${retryCount + 1}/${maxRetries}次): ${apiUrl}`);
-        const resp = await axios.get(apiUrl, { timeout: 3000 });
+        const resp = await withRetry(() => axios.get(apiUrl, { timeout: 3000 }), 'Meteora API调用');
         const data = resp?.data;
         if (data && typeof data.total_fee_usd_claimed === 'number' && typeof data.total_reward_usd_claimed === 'number') {
           const totalUsd = Number(data.total_fee_usd_claimed) + Number(data.total_reward_usd_claimed);
@@ -531,7 +531,7 @@ async function claimAllRewardsByPosition() {
           if (caX) {
             try {
               console.log('🔄 正在通过 OKX API 获取 X 代币最新价格...');
-              const xPriceStr = await fetchOkxLatestPrice(caX);
+              const xPriceStr = await withRetry(() => fetchOkxLatestPrice(caX), 'OKX X代币价格获取');
               if (xPriceStr) {
                 xUsdPrice = Number(xPriceStr);
                 console.log(`✅ OKX API 获取 X 代币价格成功: ${xUsdPrice}`);
@@ -546,7 +546,7 @@ async function claimAllRewardsByPosition() {
           }
           
           // SOL 价格通过 fetchPrice.ts 的方法实时获取（字符串转 number）
-          const solPriceStr = await fetchOkxLatestPriceFromModule(solMint);
+          const solPriceStr = await withRetry(() => fetchOkxLatestPriceFromModule(solMint), 'OKX SOL价格获取');
           const solUsdPrice = solPriceStr ? Number(solPriceStr) : undefined;
 
           if (xUsdPrice !== undefined && solUsdPrice !== undefined) {
