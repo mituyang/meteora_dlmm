@@ -118,19 +118,138 @@ function getStrategyType(strategyString: string): StrategyType {
 }
 
 /**
- * 根据 base_fee_percentage_first 确定策略类型
+ * 从 Meteora API 获取费用数据
+ * @param poolAddress 池地址
+ * @returns API 响应的费用数据，如果获取失败返回 null
+ */
+async function fetchFeeDataFromMeteoraAPI(poolAddress: string): Promise<any | null> {
+  try {
+    const url = `https://dlmm-api.meteora.ag/pair/${poolAddress}/analytic/pair_fee_bps?num_of_days=1`;
+    console.log(`🔄 正在调用 Meteora API: ${url}`);
+    
+    const response = await withRetry(
+      () => axios.get(url, { timeout: 10000 }), // 10秒超时
+      'Meteora API 费用数据获取'
+    );
+    
+    if (response?.data) {
+      return response.data;
+    }
+    return null;
+  } catch (error) {
+    console.log(`获取 Meteora API 费用数据失败:`, error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
+/**
+ * 根据 base_fee_percentage_first 和 API 费用数据确定策略类型
  * @param poolAddress 池地址
  * @param defaultStrategy 默认策略类型
  * @returns 策略类型字符串
  */
-function determineStrategyType(poolAddress: string, defaultStrategy: string): string {
+async function determineStrategyType(poolAddress: string, defaultStrategy: string): Promise<string> {
   const baseFeePercentageFirst = readBaseFeePercentageFirst(poolAddress);
   
-  if (baseFeePercentageFirst === "5") {
-    console.log(`📊 检测到 base_fee_percentage_first = 5，使用 BidAsk 策略`);
+  // 条件1: base_fee_percentage_first >= 5
+  let condition1Met = false;
+  if (baseFeePercentageFirst !== null) {
+    const baseFeeNum = parseFloat(baseFeePercentageFirst);
+    if (!isNaN(baseFeeNum) && baseFeeNum >= 5) {
+      condition1Met = true;
+      console.log(`📊 检测到 base_fee_percentage_first = ${baseFeePercentageFirst} >= 5，满足条件1`);
+    } else {
+      console.log(`📊 base_fee_percentage_first = ${baseFeePercentageFirst} < 5，不满足条件1`);
+    }
+  } else {
+    console.log(`📊 base_fee_percentage_first 为空，不满足条件1`);
+  }
+  
+  // 如果条件1已满足，直接返回 BidAsk
+  if (condition1Met) {
+    console.log(`📊 使用 BidAsk 策略（条件1满足）`);
+    return "BidAsk";
+  }
+  
+  // 条件2: 调用 API 检查费用数据
+  let condition2Met = false;
+  try {
+    const feeData = await fetchFeeDataFromMeteoraAPI(poolAddress);
+    
+    if (feeData && Array.isArray(feeData) && feeData.length > 0) {
+      // 找到最大的 hour_date 数据
+      let maxHourDateData = feeData[0];
+      let maxHourDateValue: any = null;
+      
+      // 辅助函数：将 hour_date 转换为可比较的值
+      const getHourDateValue = (hourDate: any): number | null => {
+        if (typeof hourDate === 'number') {
+          return hourDate;
+        }
+        if (typeof hourDate === 'string') {
+          // 尝试解析为时间戳
+          const timestamp = Date.parse(hourDate);
+          if (!isNaN(timestamp)) {
+            return timestamp;
+          }
+        }
+        return null;
+      };
+      
+      for (const item of feeData) {
+        if (item?.hour_date) {
+          const currentValue = getHourDateValue(item.hour_date);
+          const maxValue = getHourDateValue(maxHourDateValue);
+          
+          if (currentValue !== null) {
+            if (maxValue === null || currentValue > maxValue) {
+              maxHourDateValue = item.hour_date;
+              maxHourDateData = item;
+            }
+          } else if (maxValue === null && typeof item.hour_date === 'string') {
+            // 如果都是字符串且无法解析为时间戳，使用字符串比较（作为后备方案）
+            if (!maxHourDateValue || item.hour_date > maxHourDateValue) {
+              maxHourDateValue = item.hour_date;
+              maxHourDateData = item;
+            }
+          }
+        }
+      }
+      
+      console.log(`📊 API 响应中最大的 hour_date: ${maxHourDateValue}`);
+      console.log(`📊 对应的数据:`, JSON.stringify(maxHourDateData, null, 2));
+      
+      if (maxHourDateData) {
+        const averageFeeBps = maxHourDateData.average_fee_bps;
+        const maxFeeBps = maxHourDateData.max_fee_bps;
+        
+        console.log(`📊 average_fee_bps: ${averageFeeBps}, max_fee_bps: ${maxFeeBps}`);
+        
+        if (
+          typeof averageFeeBps === 'number' && averageFeeBps >= 400 &&
+          typeof maxFeeBps === 'number' && maxFeeBps >= 500
+        ) {
+          condition2Met = true;
+          console.log(`📊 检测到 average_fee_bps (${averageFeeBps}) >= 400 且 max_fee_bps (${maxFeeBps}) >= 500，满足条件2`);
+        } else {
+          console.log(`📊 不满足条件2: average_fee_bps (${averageFeeBps}) < 400 或 max_fee_bps (${maxFeeBps}) < 500`);
+        }
+      } else {
+        console.log(`📊 API 响应中没有找到有效的 hour_date 数据`);
+      }
+    } else {
+      console.log(`📊 API 响应为空或格式不正确`);
+    }
+  } catch (error) {
+    console.log(`📊 获取 API 费用数据时出错，跳过条件2检查:`, error instanceof Error ? error.message : String(error));
+  }
+  
+  // 判断最终策略类型
+  if (condition1Met || condition2Met) {
+    console.log(`📊 使用 BidAsk 策略`);
     return "BidAsk";
   } else {
-    console.log(`📊 base_fee_percentage_first = ${baseFeePercentageFirst}，使用默认策略: ${defaultStrategy}`);
+    console.log(`📊 两个条件均不满足，使用默认策略: ${defaultStrategy}`);
     return defaultStrategy;
   }
 }
@@ -729,8 +848,8 @@ async function main(retryCount: number = 0) {
     const POOL_ADDRESS = new PublicKey(poolAddressStr);
     console.log(`使用的POOL_ADDRESS: ${POOL_ADDRESS.toString()}${cliPoolAddress ? ' (来自命令行)' : ' (来自.env)'}`);
     
-    // 根据 base_fee_percentage_first 确定策略类型
-    const determinedStrategy = determineStrategyType(POOL_ADDRESS.toString(), STRATEGY_FROM_ENV);
+    // 根据 base_fee_percentage_first 和 API 费用数据确定策略类型
+    const determinedStrategy = await determineStrategyType(POOL_ADDRESS.toString(), STRATEGY_FROM_ENV);
     STRATEGY_TYPE = getStrategyType(determinedStrategy);
     console.log(`📊 最终使用的策略类型: ${determinedStrategy}`);
     

@@ -431,8 +431,8 @@ async function checkPriceMonitoring(poolAddress: string, currentPrice: number): 
   }
   
   // 检查是否超过10分钟
-  if (elapsedMinutes >= 10) {
-    console.log(`⏰ 监控已超过10分钟，强制执行移除流动性`);
+  if (elapsedMinutes >= 8) {
+    console.log(`⏰ 监控已超过8分钟，强制执行移除流动性`);
     await executeRemoveLiquidity(poolAddress, monitorState.positionAddress, '监控超时');
     return true;
   }
