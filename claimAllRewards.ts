@@ -701,13 +701,13 @@ async function claimAllRewardsByPosition() {
       return;
     }
     
-    console.log(`📊 领取阈值 (JSON中的solAmount): ${solAmountThreshold}`);
+    console.log(`📊 领取阈值 (JSON中的solAmount): ${solAmountThreshold} * 0.8`);
     
     // 判断是否领取（只判断 X 费用价值，SOL 费用不判断）
-    if (feeValue > solAmountThreshold * 0.9) {
-      console.log(`✅ ${xTokenName}费用价值大于 ${solAmountThreshold * 0.9}，继续领取...`);
+    if (feeValue > solAmountThreshold * 0.8) {
+      console.log(`✅ ${xTokenName}费用价值大于 ${solAmountThreshold * 0.8}，继续领取...`);
     } else {
-      console.log(`❌ ${xTokenName}费用价值小于等于 ${solAmountThreshold * 0.9}，跳过领取`);
+      console.log(`❌ ${xTokenName}费用价值小于等于 ${solAmountThreshold * 0.8}，跳过领取`);
       return;
     }
 
