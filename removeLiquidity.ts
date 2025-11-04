@@ -351,6 +351,90 @@ function calculateTokenValue(ca: string, balance: number): number {
 }
 
 /**
+ * 根据代币余额执行swap的辅助函数
+ * @param ca token合约地址
+ * @param balance 代币余额
+ * @param finalThreshold 费用判断阈值
+ * @returns 是否swap成功
+ */
+async function executeSwapIfNeeded(ca: string, balance: number, finalThreshold: number): Promise<boolean> {
+  if (balance <= 0) {
+    return false;
+  }
+  
+  console.log(`✅ 检测到代币余额: ${balance}，立即执行 jupSwap`);
+  
+  // 计算代币价值
+  const tokenValue = calculateTokenValue(ca, balance);
+  
+  // 根据代币价值设置maxfee
+  const feeData = readSwapFeeData();
+  let maxfee: number;
+  
+  if (tokenValue < finalThreshold) {
+    // 小于阈值：使用Q1费用，但上限为500000
+    const q1Fee = feeData?.q1 || 100000;
+    maxfee = Math.min(q1Fee, 500000);
+    console.log(`💸 代币价值: ${tokenValue} USD (< ${finalThreshold})，使用Q1费用: ${q1Fee}，实际maxfee: ${maxfee}`);
+  } else {
+    // 大于等于阈值：使用Q3费用
+    const q3Fee = feeData?.q3 || 500000;
+    maxfee = q3Fee;
+    console.log(`💸 代币价值: ${tokenValue} USD (>= ${finalThreshold})，使用Q3费用: ${q3Fee}，实际maxfee: ${maxfee}`);
+  }
+  
+  if (!feeData) {
+    console.warn('⚠️ 无法读取费用数据，使用默认值');
+  }
+  
+  return await executeJupSwap(ca, maxfee);
+}
+
+/**
+ * 继续检查余额并执行swap（两次swap方案，用于处理延迟到账的情况）
+ * @param ca token合约地址
+ * @param finalThreshold 费用判断阈值
+ */
+async function continueCheckBalanceAndSwap(ca: string, finalThreshold: number): Promise<void> {
+  const maxChecks = 10; // 最多检查10次
+  const checkInterval = 1100; // 每次间隔1.1秒
+  
+  console.log(`🔄 开始后续检查（两次swap方案，最多${maxChecks}次，每次间隔${checkInterval}ms）: ${ca}`);
+  
+  for (let i = 1; i <= maxChecks; i++) {
+    // 等待间隔时间
+    await new Promise(resolve => setTimeout(resolve, checkInterval));
+    
+    try {
+      // 检查代币余额
+      const balance = await checkTokenBalance(ca);
+      
+      if (balance > 0) {
+        console.log(`🔍 第 ${i} 次检查：发现余额 ${balance}，执行swap`);
+        const swapSuccess = await executeSwapIfNeeded(ca, balance, finalThreshold);
+        
+        if (swapSuccess) {
+          // 如果swap成功，继续下一轮检查（因为可能还有更多代币延迟到账）
+          console.log(`✅ 第 ${i} 次swap成功，继续检查...`);
+        } else {
+          // 即使swap失败，也继续检查（因为后续可能还有延迟到账的代币）
+          console.log(`⚠️ 第 ${i} 次swap失败，但继续检查（两次swap方案）`);
+        }
+        // 无论swap成功与否都继续检查
+        continue;
+      } else {
+        console.log(`🔍 第 ${i} 次检查：余额为0`);
+      }
+    } catch (error) {
+      console.error(`❌ 第 ${i} 次检查失败:`, error instanceof Error ? error.message : String(error));
+      // 即使出错也继续检查
+    }
+  }
+  
+  console.log(`✅ 完成${maxChecks}次后续检查，结束`);
+}
+
+/**
  * 智能等待代币到账并执行 jupSwap
  * @param ca token合约地址
  * @param poolAddress 池地址，用于读取solAmount
@@ -384,32 +468,12 @@ async function waitForTokenAndExecuteJupSwap(ca: string, poolAddress: string): P
       // 检查代币余额
       const balance = await checkTokenBalance(ca);
       if (balance > 0) {
-        console.log(`✅ 检测到代币余额: ${balance}，立即执行 jupSwap`);
+        // 执行首次swap（无论成功与否）
+        await executeSwapIfNeeded(ca, balance, finalThreshold);
         
-        // 计算代币价值
-        const tokenValue = calculateTokenValue(ca, balance);
+        // 无论首次swap是否成功，都继续检查余额（两次swap方案，处理延迟到账的情况）
+        await continueCheckBalanceAndSwap(ca, finalThreshold);
         
-        // 根据代币价值设置maxfee
-        const feeData = readSwapFeeData();
-        let maxfee: number;
-        
-        if (tokenValue < finalThreshold) {
-          // 小于阈值：使用Q1费用，但上限为500000
-          const q1Fee = feeData?.q1 || 100000;
-          maxfee = Math.min(q1Fee, 500000);
-          console.log(`💸 代币价值: ${tokenValue} USD (< ${finalThreshold})，使用Q1费用: ${q1Fee}，实际maxfee: ${maxfee}`);
-        } else {
-          // 大于等于阈值：使用Q3费用
-          const q3Fee = feeData?.q3 || 500000;
-          maxfee = q3Fee;
-          console.log(`💸 代币价值: ${tokenValue} USD (>= ${finalThreshold})，使用Q3费用: ${q3Fee}，实际maxfee: ${maxfee}`);
-        }
-        
-        if (!feeData) {
-          console.warn('⚠️ 无法读取费用数据，使用默认值');
-        }
-        
-        await executeJupSwap(ca, maxfee);
         return;
       }
       
@@ -425,8 +489,12 @@ async function waitForTokenAndExecuteJupSwap(ca: string, poolAddress: string): P
     }
   }
   
+  // 超时时也执行swap（无论成功与否）
   console.log(`⏰ 等待超时(10秒)，强制执行 jupSwap`);
   await executeJupSwap(ca, 500000); // 超时时使用默认maxfee
+  
+  // 无论超时swap是否成功，都继续检查余额（两次swap方案，处理延迟到账的情况）
+  await continueCheckBalanceAndSwap(ca, finalThreshold);
 }
 
 /**
