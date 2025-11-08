@@ -331,15 +331,48 @@ function calculateSolAmountFromTotalQuoteLiquidity(totalQuoteLiquidity: string):
     return 2;
   }
   
-  if (value < 60000) {
+  // 读取 SOL 价格文件
+  const solPriceFile = path.resolve(__dirname, 'data', 'prices', 'So11111111111111111111111111111111111111112.json');
+  let solPrice: number;
+  
+  try {
+    if (!fs.existsSync(solPriceFile)) {
+      console.log(`⚠️ SOL 价格文件不存在: ${solPriceFile}，使用默认值 2`);
+      return 2;
+    }
+    
+    const priceData = JSON.parse(fs.readFileSync(solPriceFile, 'utf-8'));
+    solPrice = parseFloat(priceData.price);
+    
+    if (isNaN(solPrice) || solPrice <= 0) {
+      console.log(`⚠️ SOL 价格无效: ${priceData.price}，使用默认值 2`);
+      return 2;
+    }
+  } catch (error) {
+    console.log(`⚠️ 读取 SOL 价格文件失败: ${error instanceof Error ? error.message : String(error)}，使用默认值 2`);
     return 2;
-  } else if (value >= 60000 && value < 80000) {
-    return 3;
-  } else if (value >= 80000 && value < 100000) {
-    return 4;
-  } else {
-    return 5;
   }
+  
+  // 计算：value * 0.01 / solPrice
+  const calculatedAmount = (value * 0.01) / solPrice;
+  
+  // 向下取整到 0.5 的倍数
+  // 例如：3.4 → 3.0, 3.7 → 3.5, 3.9 → 3.5
+  let solAmount = Math.floor(calculatedAmount * 2) / 2;
+  
+  // 确保至少为 0.5
+  if (solAmount < 0.5) {
+    console.log(`⚠️ 计算出的 solAmount (${solAmount}) 小于 0.5，使用默认值 2`);
+    return 2;
+  }
+  
+  // 上限为 6
+  if (solAmount > 6) {
+    solAmount = 6;
+    console.log(`📊 计算出的 solAmount 超过上限 6，已调整为 6`);
+  }
+  
+  return solAmount;
 }
 
 // 解析 solAmount（优先级：命令行 > .env > 默认为2）
@@ -493,7 +526,7 @@ async function createExtendedEmptyPosition(
 
 /**
  * 从 OKX DEX 获取指定 token 的 1m K线数据并输出
- * 固定参数：chainIndex=501, bar=1m, limit=10
+ * 固定参数：chainIndex=501, bar=1m, limit=299（OKX API最大支持299条，约5小时数据）
  * 其余参数（after/before）保留为空
  */
 async function fetchOkxCandles(tokenContractAddress: string, after?: string, before?: string): Promise<any> {
@@ -502,7 +535,7 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
   params.set('chainIndex', '501');
   params.set('tokenContractAddress', tokenContractAddress);
   params.set('bar', '1m');
-  params.set('limit', '10');
+  params.set('limit', '299');
   if (after) params.set('after', after);
   if (before) params.set('before', before);
   const url = `${baseUrl}?${params.toString()}`;
@@ -529,7 +562,7 @@ async function fetchOkxCandles(tokenContractAddress: string, after?: string, bef
     }).on('error', (e) => reject(e));
   });
 
-  // console.log('OKX DEX 1m K线（limit=10）响应:');
+  // console.log('OKX DEX 1m K线（limit=299）响应:');
   // console.log(JSON.stringify(data, null, 2));
   return data;
 }
