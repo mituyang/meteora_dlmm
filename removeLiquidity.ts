@@ -635,6 +635,15 @@ function getSkipSwapFromArgs(): boolean {
   return false;
 }
 
+// 从命令行参数中获取是否跳过移动到history
+function getSkipMoveToHistoryFromArgs(): boolean {
+  for (const arg of argv) {
+    if (arg === '--skipMoveToHistory' || arg === '--skipMoveToHistory=true') return true;
+    if (arg === '--skipMoveToHistory=false') return false;
+  }
+  return false; // 默认不跳过，执行移动操作
+}
+
 /**
  * 解密私钥
  * @param encryptedPrivateKey 加密的私钥
@@ -800,7 +809,13 @@ async function removeLiquidity() {
       }
     }
 
-    await moveJsonToHistory(finalPoolAddress);
+    // 可通过 --skipMoveToHistory 控制是否跳过移动到history（默认执行）
+    const skipMoveToHistory = getSkipMoveToHistoryFromArgs();
+    if (skipMoveToHistory) {
+      console.log('⏭️ 检测到 --skipMoveToHistory，跳过移动到history操作');
+    } else {
+      await moveJsonToHistory(finalPoolAddress);
+    }
     
   } catch (error) {
     console.error('错误:', error);
