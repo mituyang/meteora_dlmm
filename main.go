@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -135,9 +137,9 @@ func main() {
 	}
 
 	logOutput("开始监听文件: %s\n", csvPath)
+	logOutput("CSV文件当前行数: %d\n", currentLineCount)
 	logOutput("开始监听目录: %s\n", dataDir)
 	logOutput("CSV字段数: %d\n", len(csvHeaders))
-	logOutput("当前行数: %d\n", currentLineCount)
 
 	// 启动价格获取定时任务
 	shutdownWg.Add(1)
@@ -158,6 +160,13 @@ func main() {
 	go func() {
 		defer shutdownWg.Done()
 		startJupSwapTicker()
+	}()
+
+	// 启动SOL价格获取定时任务（每小时的整10分钟的30秒）
+	shutdownWg.Add(1)
+	go func() {
+		defer shutdownWg.Done()
+		startSolPriceFetcherTicker()
 	}()
 
 	// 创建文件监听器
@@ -1380,3 +1389,227 @@ func executeJupSwapForToken(ca string) {
 }
 
 // 删除重试逻辑：不再保留 readFileWithRetry 和 runCmdWithRetry
+
+// 启动SOL价格获取定时任务（每小时的整10分钟的30秒）
+func startSolPriceFetcherTicker() {
+	logOutput("🕐 启动SOL价格获取定时任务（每小时的整10分钟的30秒）\n")
+
+	// 计算到下一个整10分钟的30秒的时间
+	now := time.Now()
+	currentMinute := now.Minute()
+	currentSecond := now.Second()
+
+	// 计算下一个整10分钟（0, 10, 20, 30, 40, 50）
+	nextTenMinute := ((currentMinute / 10) + 1) * 10
+	var nextTarget time.Time
+
+	if nextTenMinute >= 60 {
+		// 如果超过60，则下一小时的第0分钟30秒
+		nextTarget = now.Truncate(time.Hour).Add(time.Hour).Add(30 * time.Second)
+	} else {
+		// 计算下一个整10分钟的30秒
+		nextTarget = now.Truncate(time.Hour).Add(time.Duration(nextTenMinute) * time.Minute).Add(30 * time.Second)
+		// 如果当前时间已经过了这个时间点（比如当前是0:10:35），则等到下一个整10分钟
+		if now.After(nextTarget) || (currentMinute == nextTenMinute && currentSecond >= 30) {
+			nextTarget = nextTarget.Add(10 * time.Minute)
+			// 如果加10分钟后超过60分钟，则下一小时
+			if nextTarget.Minute() >= 60 {
+				nextTarget = now.Truncate(time.Hour).Add(time.Hour).Add(30 * time.Second)
+			}
+		}
+	}
+
+	initialDelay := nextTarget.Sub(now)
+	logOutput("⏰ 距离下次SOL价格获取还有: %v (将在 %s 执行)\n", initialDelay.Round(time.Second), nextTarget.Format("15:04:05"))
+
+	// 等待到下一个时间点，但可以被取消
+	select {
+	case <-globalCtx.Done():
+		logOutput("🛑 收到关闭信号，停止SOL价格获取定时任务\n")
+		return
+	case <-time.After(initialDelay):
+		// 继续执行
+	}
+
+	// 立即执行一次
+	fetchSolPriceFromOkx()
+
+	// 然后每10分钟检查一次（在整10分钟的30秒执行）
+	ticker := time.NewTicker(1 * time.Second) // 每秒检查一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-globalCtx.Done():
+			logOutput("🛑 收到关闭信号，停止SOL价格获取定时任务\n")
+			return
+		case <-ticker.C:
+			now := time.Now()
+			minute := now.Minute()
+			second := now.Second()
+			// 在整10分钟的30秒时执行（0:30, 10:30, 20:30, 30:30, 40:30, 50:30）
+			if minute%10 == 0 && second == 30 {
+				fetchSolPriceFromOkx()
+			}
+		}
+	}
+}
+
+// 从OKX DEX API获取SOL价格并保存到JSON文件
+func fetchSolPriceFromOkx() {
+	logOutput("🔄 开始获取SOL价格 - %s\n", time.Now().Format("15:04:05"))
+
+	solMint := "So11111111111111111111111111111111111111112"
+
+	// 最多重试3次
+	const maxRetries = 3
+	var price string
+	var err error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// 检查全局上下文是否已取消
+		select {
+		case <-globalCtx.Done():
+			logOutput("🛑 程序已取消，停止获取SOL价格\n")
+			return
+		default:
+		}
+
+		if attempt > 1 {
+			logOutput("🔄 重试获取SOL价格 (第 %d/%d 次) - %s\n", attempt, maxRetries, time.Now().Format("15:04:05"))
+			// 重试前等待1秒，但可以被取消
+			select {
+			case <-globalCtx.Done():
+				logOutput("🛑 程序已取消，停止获取SOL价格\n")
+				return
+			case <-time.After(1 * time.Second):
+				// 继续重试
+			}
+		}
+
+		price, err = fetchOkxPriceForToken(solMint)
+		if err == nil && price != "" {
+			// 成功获取价格，跳出循环
+			break
+		}
+
+		if attempt < maxRetries {
+			logOutput("⚠️ 获取SOL价格失败 (第 %d/%d 次): %v\n", attempt, maxRetries, err)
+		} else {
+			logOutput("❌ 获取SOL价格失败，已重试 %d 次: %v\n", maxRetries, err)
+			return
+		}
+	}
+
+	if price == "" {
+		logOutput("❌ 获取SOL价格为空，已重试 %d 次\n", maxRetries)
+		return
+	}
+
+	// 保存到JSON文件
+	priceDir := "/Users/yqw/meteora_dlmm/data/prices"
+	if err := os.MkdirAll(priceDir, 0755); err != nil {
+		logOutput("❌ 创建价格目录失败: %v\n", err)
+		return
+	}
+
+	priceFilePath := filepath.Join(priceDir, fmt.Sprintf("%s.json", solMint))
+	priceData := map[string]interface{}{
+		"price":     price,
+		"timestamp": time.Now().UnixMilli(),
+	}
+
+	jsonData, err := json.Marshal(priceData)
+	if err != nil {
+		logOutput("❌ 序列化价格数据失败: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(priceFilePath, jsonData, 0644); err != nil {
+		logOutput("❌ 保存价格文件失败: %v\n", err)
+		return
+	}
+
+	logOutput("✅ SOL价格获取成功: %s，已保存到 %s\n", price, priceFilePath)
+}
+
+// 从OKX DEX API获取指定代币的价格（使用K线接口，无需鉴权）
+func fetchOkxPriceForToken(tokenContractAddress string) (string, error) {
+	// 构建请求URL
+	baseURL := "https://web3.okx.com/api/v6/dex/market/historical-candles"
+	params := url.Values{}
+	params.Set("chainIndex", "501")
+	params.Set("tokenContractAddress", tokenContractAddress)
+	params.Set("bar", "1m")
+	params.Set("limit", "10")
+	requestURL := fmt.Sprintf("%s?%s", baseURL, params.Encode())
+
+	// 创建HTTP请求
+	ctx, cancel := context.WithTimeout(globalCtx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("创建请求失败: %v", err)
+	}
+
+	// 发送请求
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 检查状态码
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP状态码: %d", resp.StatusCode)
+	}
+
+	// 读取响应
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	// 解析JSON响应
+	var result struct {
+		Code string        `json:"code"`
+		Msg  string        `json:"msg"`
+		Data []interface{} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("解析JSON失败: %v", err)
+	}
+
+	// 检查响应码
+	if result.Code != "0" {
+		return "", fmt.Errorf("OKX API返回错误: code=%s, msg=%s", result.Code, result.Msg)
+	}
+
+	// 检查数据
+	if len(result.Data) == 0 {
+		return "", fmt.Errorf("OKX API返回数据为空")
+	}
+
+	// 获取最新的K线数据（数组第一个元素是最新的）
+	latestCandle, ok := result.Data[0].([]interface{})
+	if !ok || len(latestCandle) < 2 {
+		return "", fmt.Errorf("K线数据格式错误")
+	}
+
+	// 根据文档，数组格式为：[ts,o,h,l,c,vol,volUsd,confirm]
+	// o 是开盘价，位于索引1
+	priceStr, ok := latestCandle[1].(string)
+	if !ok {
+		// 如果价格是数字类型，转换为字符串
+		if priceNum, ok := latestCandle[1].(float64); ok {
+			priceStr = fmt.Sprintf("%.8f", priceNum)
+		} else {
+			return "", fmt.Errorf("价格格式错误")
+		}
+	}
+
+	return priceStr, nil
+}
