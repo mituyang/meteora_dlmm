@@ -331,6 +331,13 @@ function calculateSolAmountFromTotalQuoteLiquidity(totalQuoteLiquidity: string):
     return 2;
   }
   
+  // total_quote_liquidity_first 上限为 100100
+  let effectiveValue = value;
+  if (value > 100100) {
+    console.log(`⚠️ total_quote_liquidity_first (${value}) 超过上限 100100，使用上限值`);
+    effectiveValue = 100100;
+  }
+  
   // 读取 SOL 价格文件
   const solPriceFile = path.resolve(__dirname, 'data', 'prices', 'So11111111111111111111111111111111111111112.json');
   let solPrice: number;
@@ -353,8 +360,8 @@ function calculateSolAmountFromTotalQuoteLiquidity(totalQuoteLiquidity: string):
     return 2;
   }
   
-  // 计算：value * 0.01 / solPrice
-  const calculatedAmount = (value * 0.01) / solPrice;
+  // 计算：effectiveValue * 0.01 / solPrice
+  const calculatedAmount = (effectiveValue * 0.01) / solPrice;
   
   // 向下取整到 0.5 的倍数
   // 例如：3.4 → 3.0, 3.7 → 3.5, 3.9 → 3.5
@@ -366,11 +373,7 @@ function calculateSolAmountFromTotalQuoteLiquidity(totalQuoteLiquidity: string):
     return 2;
   }
   
-  // 上限为 6
-  if (solAmount > 6) {
-    solAmount = 6;
-    console.log(`📊 计算出的 solAmount 超过上限 6，已调整为 6`);
-  }
+  // 不设置 SOL 上限
   
   return solAmount;
 }
@@ -470,6 +473,7 @@ function calculateDynamicLeftBins(bin_step: number): number {
 function parseLastUpdatedFirstToMillisEast8(input: string): number {
   // 拆分日期与时间
   const [datePart, timePart] = input.trim().split(' ');
+  
   if (!datePart || !timePart) throw new Error('last_updated_first 格式错误，应为 YYYY-MM-DD HH:mm:ss');
   const [year, month, day] = datePart.split('-').map(Number);
   const [hour, minute] = timePart.split(':').map(Number); // 秒将置零
